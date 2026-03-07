@@ -7,6 +7,7 @@ It supports:
 - Orientation-based display layout
 - Magnet/reed-switch wake
 - OTA firmware updates
+- Optional internet auto-update from GitHub release binaries
 - Daily data refresh from a JSON endpoint
 - Auto firmware version from Git (`git describe --tags --always --dirty`)
 
@@ -54,6 +55,23 @@ Relevant constants in `src/DiveInfo.ino`:
 - OTA listens for `OTA_WINDOW_MS` (currently 60s).
 - If no OTA upload occurs, firmware reboots.
 
+## Internet OTA (Optional)
+
+- If `INTERNET_OTA_MANIFEST_URL` is set in `src/secrets.h`, firmware checks for updates:
+  - During daily timer wake (`INTERNET_OTA_CHECK_ON_TIMER_WAKE = 1`)
+  - When OTA mode is entered with the magnet
+- If manifest `version` differs from current firmware version, the device downloads and applies `bin_url`.
+- Updates are skipped when battery percent is below `INTERNET_OTA_MIN_BATTERY_PERCENT`.
+
+Manifest JSON example:
+
+```json
+{
+  "version": "v1.6.0",
+  "bin_url": "https://github.com/<user>/<repo>/releases/download/v1.6.0/firmware.bin"
+}
+```
+
 ## Build and Upload (PlatformIO)
 
 `platformio.ini` is configured with:
@@ -79,6 +97,9 @@ Firmware secrets/config:
   - `JSON_URL`
   - `OTA_HOSTNAME`
   - `OTA_PASSWORD` (set non-empty for protection)
+  - `INTERNET_OTA_MANIFEST_URL` (optional)
+  - `INTERNET_OTA_MIN_BATTERY_PERCENT` (optional)
+  - `INTERNET_OTA_CHECK_ON_TIMER_WAKE` (optional)
 
 Runtime settings in code (`src/DiveInfo.ino`):
 - `OTA_ROTATION` if you want a different trigger orientation

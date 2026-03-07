@@ -15,3 +15,13 @@ static const char* JSON_URL = "https://your-worker-name.workers.dev/";
 // OTA settings
 static const char* OTA_HOSTNAME = "diveinfo-e290";
 static const char* OTA_PASSWORD = "";
+
+// Internet OTA settings (optional)
+// Manifest JSON format:
+// {
+//   "version": "v1.6.0",
+//   "bin_url": "https://github.com/<user>/<repo>/releases/download/v1.6.0/firmware.bin"
+// }
+#define INTERNET_OTA_MANIFEST_URL ""
+#define INTERNET_OTA_MIN_BATTERY_PERCENT 25.0f
+#define INTERNET_OTA_CHECK_ON_TIMER_WAKE 1

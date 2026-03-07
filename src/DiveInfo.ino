@@ -7,6 +7,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <HTTPUpdate.h>
 #include <ArduinoOTA.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
@@ -24,6 +25,18 @@
 #define FIRMWARE_VERSION_STR "unknown"
 #endif
 const String FIRMWARE_VERSION = FIRMWARE_VERSION_STR;
+
+// Internet OTA settings.
+// Define these in src/secrets.h to enable update checks from a hosted JSON manifest.
+#ifndef INTERNET_OTA_MANIFEST_URL
+#define INTERNET_OTA_MANIFEST_URL ""
+#endif
+#ifndef INTERNET_OTA_MIN_BATTERY_PERCENT
+#define INTERNET_OTA_MIN_BATTERY_PERCENT 25.0f
+#endif
+#ifndef INTERNET_OTA_CHECK_ON_TIMER_WAKE
+#define INTERNET_OTA_CHECK_ON_TIMER_WAKE 1
+#endif
 
 // ================= DISPLAY =================
 DEPG0290BxS800FxX_BW display(5, 4, 3, 6, 2, 1, -1, 6000000);
@@ -523,6 +536,103 @@ bool showCachedStats() {
   return true;
 }
 
+// ================= INTERNET OTA =================
+bool internetOtaConfigured() {
+  return strlen(INTERNET_OTA_MANIFEST_URL) > 0;
+}
+
+bool fetchInternetOtaManifest(String& version, String& binUrl) {
+  if (!internetOtaConfigured()) return false;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+
+  if (!http.begin(client, INTERNET_OTA_MANIFEST_URL)) return false;
+
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) {
+    Serial.printf("Internet OTA manifest HTTP error: %d\n", code);
+    http.end();
+    return false;
+  }
+
+  StaticJsonDocument<1024> doc;
+  DeserializationError err = deserializeJson(doc, http.getString());
+  http.end();
+  if (err) {
+    Serial.printf("Internet OTA manifest parse error: %s\n", err.c_str());
+    return false;
+  }
+
+  version = doc["version"] | "";
+  binUrl = doc["bin_url"] | doc["binUrl"] | doc["firmware_url"] | doc["firmwareUrl"] | doc["firmware"] | "";
+  version.trim();
+  binUrl.trim();
+
+  if (version.length() == 0 || binUrl.length() == 0) {
+    Serial.println("Internet OTA manifest missing version or bin URL");
+    return false;
+  }
+
+  return true;
+}
+
+bool applyInternetOta(const String& targetVersion, const String& binUrl) {
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  httpUpdate.rebootOnUpdate(true);
+  httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+
+  Serial.printf("Internet OTA applying %s -> %s\n", FIRMWARE_VERSION.c_str(), targetVersion.c_str());
+  Serial.printf("Internet OTA URL: %s\n", binUrl.c_str());
+
+  t_httpUpdate_return result = httpUpdate.update(client, binUrl, FIRMWARE_VERSION);
+
+  if (result == HTTP_UPDATE_OK) {
+    Serial.println("Internet OTA update applied");
+    return true;
+  }
+
+  if (result == HTTP_UPDATE_NO_UPDATES) {
+    Serial.println("Internet OTA reports no updates");
+    return false;
+  }
+
+  Serial.printf(
+    "Internet OTA failed (%d): %s\n",
+    httpUpdate.getLastError(),
+    httpUpdate.getLastErrorString().c_str()
+  );
+  return false;
+}
+
+bool checkAndApplyInternetOta() {
+  if (!internetOtaConfigured()) return false;
+
+  float battery = fuelGauge.getSOC();
+  if (battery >= 0.0f && battery < INTERNET_OTA_MIN_BATTERY_PERCENT) {
+    Serial.printf(
+      "Internet OTA skipped: battery %.1f%% below %.1f%%\n",
+      battery,
+      INTERNET_OTA_MIN_BATTERY_PERCENT
+    );
+    return false;
+  }
+
+  String targetVersion;
+  String binUrl;
+  if (!fetchInternetOtaManifest(targetVersion, binUrl)) return false;
+
+  if (targetVersion == FIRMWARE_VERSION) {
+    Serial.println("Internet OTA: already on latest version");
+    return false;
+  }
+
+  return applyInternetOta(targetVersion, binUrl);
+}
+
 // ================= WIFI =================
 bool connectWiFi() {
   for (int i = 0; i < WIFI_COUNT; i++) {
@@ -597,6 +707,10 @@ void enterOtaMode() {
 
   // Update cached stats during OTA mode (force refresh)
   fetchAndUpdateCache(true);
+
+  // Check internet OTA manifest and update automatically if a newer version exists.
+  // If update is applied successfully, the device will reboot.
+  checkAndApplyInternetOta();
 
   ArduinoOTA.setHostname(OTA_HOSTNAME);
   if (OTA_PASSWORD && OTA_PASSWORD[0] != '\0') {
@@ -703,6 +817,13 @@ void setup() {
         display.display();
         delay(2000);
       } else {
+#if INTERNET_OTA_CHECK_ON_TIMER_WAKE
+        if (timerWake) {
+          // Daily wake checks GitHub manifest for a newer firmware.
+          // Successful update reboots before continuing.
+          checkAndApplyInternetOta();
+        }
+#endif
         if (!fetchAndUpdateCache(true)) {
           // fall back to cached data if refresh fails
           showCachedStats();
