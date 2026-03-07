@@ -710,12 +710,14 @@ void showOtaBatteryScreen(bool horizontal, const String &ip, const String &statu
   display.setFont(ArialMT_Plain_10);
 
   if (horizontal) {
-    if (status1.length()) display.drawString(296 / 2, 8, status1);
-    if (status2.length()) display.drawString(296 / 2, 20, status2);
+    // Place status between voltage and IP so it doesn't cover the logo.
+    if (status1.length()) display.drawString(296 / 2, 92, status1);
+    if (status2.length()) display.drawString(296 / 2, 100, status2);
     display.drawString(296 / 2, 108, "IP: " + ip);
   } else {
-    if (status1.length()) display.drawString(128 / 2, 8, status1);
-    if (status2.length()) display.drawString(128 / 2, 20, status2);
+    // Place status between voltage and IP so it doesn't cover the logo.
+    if (status1.length()) display.drawString(128 / 2, 228, status1);
+    if (status2.length()) display.drawString(128 / 2, 240, status2);
     display.drawString(128 / 2, 264, "IP: " + ip);
   }
 
