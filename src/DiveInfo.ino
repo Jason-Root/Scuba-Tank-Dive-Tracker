@@ -20,7 +20,10 @@
 #include "secrets.example.h"
 #endif
 
-const String FIRMWARE_VERSION = "v1.5.0";  
+#ifndef FIRMWARE_VERSION_STR
+#define FIRMWARE_VERSION_STR "unknown"
+#endif
+const String FIRMWARE_VERSION = FIRMWARE_VERSION_STR;
 
 // ================= DISPLAY =================
 DEPG0290BxS800FxX_BW display(5, 4, 3, 6, 2, 1, -1, 6000000);

@@ -8,6 +8,7 @@ It supports:
 - Magnet/reed-switch wake
 - OTA firmware updates
 - Daily data refresh from a JSON endpoint
+- Auto firmware version from Git (`git describe --tags --always --dirty`)
 
 ## What It Displays
 
@@ -40,7 +41,7 @@ Expected fields:
 - OTA mode is entered when rotation matches `OTA_ROTATION` (currently `270` in code trigger logic).
 - Side orientations are rendered at 90-degree display orientation to avoid showing a 270-degree-rendered screen.
 
-Relevant constants in `src/DiveInfoV1_3.ino`:
+Relevant constants in `src/DiveInfo.ino`:
 - `OTA_ROTATION`
 - `OTA_WINDOW_MS`
 - `WAKE_PIN`
@@ -79,7 +80,7 @@ Firmware secrets/config:
   - `OTA_HOSTNAME`
   - `OTA_PASSWORD` (set non-empty for protection)
 
-Runtime settings in code (`src/DiveInfoV1_3.ino`):
+Runtime settings in code (`src/DiveInfo.ino`):
 - `OTA_ROTATION` if you want a different trigger orientation
 
 Edit `platformio.ini`:
@@ -97,3 +98,4 @@ Worker secrets/config (`src/worker.js`):
 - `src/worker.js` is included in this repo as a Cloudflare Worker source for generating the JSON payload.
 - OTA upload requires the board to be on the OTA screen and reachable on the same network.
 - `src/secrets.h` is intentionally ignored by Git so personal Wi-Fi and endpoint values are not committed.
+- Firmware version shown on screen is injected at build time from Git via `scripts/git_version.py`.
