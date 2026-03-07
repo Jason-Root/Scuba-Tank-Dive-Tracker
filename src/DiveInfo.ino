@@ -582,7 +582,8 @@ bool applyInternetOta(const String& targetVersion, const String& binUrl) {
   WiFiClientSecure client;
   client.setInsecure();
 
-  httpUpdate.rebootOnUpdate(true);
+  // We reboot manually after showing a status message on screen.
+  httpUpdate.rebootOnUpdate(false);
   httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
 
   Serial.printf("Internet OTA applying %s -> %s\n", FIRMWARE_VERSION.c_str(), targetVersion.c_str());
@@ -608,8 +609,15 @@ bool applyInternetOta(const String& targetVersion, const String& binUrl) {
   return false;
 }
 
-bool checkAndApplyInternetOta() {
-  if (!internetOtaConfigured()) return false;
+bool checkForInternetOtaUpdate(String& targetVersion, String& binUrl, String& status) {
+  targetVersion = "";
+  binUrl = "";
+  status = "";
+
+  if (!internetOtaConfigured()) {
+    status = "Internet OTA Off";
+    return false;
+  }
 
   float battery = fuelGauge.getSOC();
   if (battery >= 0.0f && battery < INTERNET_OTA_MIN_BATTERY_PERCENT) {
@@ -618,18 +626,35 @@ bool checkAndApplyInternetOta() {
       battery,
       INTERNET_OTA_MIN_BATTERY_PERCENT
     );
+    status = "Battery Too Low";
     return false;
   }
 
-  String targetVersion;
-  String binUrl;
-  if (!fetchInternetOtaManifest(targetVersion, binUrl)) return false;
+  if (!fetchInternetOtaManifest(targetVersion, binUrl)) {
+    status = "Manifest Error";
+    return false;
+  }
 
   if (targetVersion == FIRMWARE_VERSION) {
     Serial.println("Internet OTA: already on latest version");
+    status = "Already Latest";
     return false;
   }
 
+  status = "Update Available";
+  return true;
+}
+
+bool runInternetOtaIfAvailable() {
+  String targetVersion;
+  String binUrl;
+  String status;
+  if (!checkForInternetOtaUpdate(targetVersion, binUrl, status)) {
+    if (status.length()) {
+      Serial.println("Internet OTA: " + status);
+    }
+    return false;
+  }
   return applyInternetOta(targetVersion, binUrl);
 }
 
@@ -675,7 +700,7 @@ bool fetchAndUpdateCache(bool forceRefresh) {
 }
 
 // ================= OTA =================
-void showOtaBatteryScreen(bool horizontal, const String &ip) {
+void showOtaBatteryScreen(bool horizontal, const String &ip, const String &status1 = "", const String &status2 = "") {
   if (horizontal)
     renderBatteryScreenHorizontal();
   else
@@ -685,8 +710,12 @@ void showOtaBatteryScreen(bool horizontal, const String &ip) {
   display.setFont(ArialMT_Plain_10);
 
   if (horizontal) {
+    if (status1.length()) display.drawString(296 / 2, 8, status1);
+    if (status2.length()) display.drawString(296 / 2, 20, status2);
     display.drawString(296 / 2, 108, "IP: " + ip);
   } else {
+    if (status1.length()) display.drawString(128 / 2, 8, status1);
+    if (status2.length()) display.drawString(128 / 2, 20, status2);
     display.drawString(128 / 2, 264, "IP: " + ip);
   }
 
@@ -705,12 +734,33 @@ void enterOtaMode() {
     return;
   }
 
+  const bool horizontal = (savedRotation == 0 || savedRotation == 180);
+  const String ip = WiFi.localIP().toString();
+
   // Update cached stats during OTA mode (force refresh)
   fetchAndUpdateCache(true);
 
-  // Check internet OTA manifest and update automatically if a newer version exists.
-  // If update is applied successfully, the device will reboot.
-  checkAndApplyInternetOta();
+  // Check internet OTA manifest and show status on screen.
+  showOtaBatteryScreen(horizontal, ip, "Internet OTA", "Checking...");
+  String targetVersion;
+  String binUrl;
+  String internetStatus;
+  if (checkForInternetOtaUpdate(targetVersion, binUrl, internetStatus)) {
+    showOtaBatteryScreen(horizontal, ip, "Internet OTA", "Updating...");
+    if (applyInternetOta(targetVersion, binUrl)) {
+      showOtaBatteryScreen(horizontal, ip, "Internet OTA", "Updated. Rebooting");
+      delay(1200);
+      ESP.restart();
+    } else {
+      showOtaBatteryScreen(horizontal, ip, "Internet OTA", "Update Failed");
+      delay(1200);
+    }
+  } else {
+    if (internetStatus.length()) {
+      showOtaBatteryScreen(horizontal, ip, "Internet OTA", internetStatus);
+      delay(900);
+    }
+  }
 
   ArduinoOTA.setHostname(OTA_HOSTNAME);
   if (OTA_PASSWORD && OTA_PASSWORD[0] != '\0') {
@@ -725,8 +775,7 @@ void enterOtaMode() {
 
   ArduinoOTA.begin();
 
-  const bool horizontal = (savedRotation == 0 || savedRotation == 180);
-  showOtaBatteryScreen(horizontal, WiFi.localIP().toString());
+  showOtaBatteryScreen(horizontal, ip, "Local OTA", "Ready");
 
   uint32_t start = millis();
   while (millis() - start < OTA_WINDOW_MS) {
@@ -820,8 +869,12 @@ void setup() {
 #if INTERNET_OTA_CHECK_ON_TIMER_WAKE
         if (timerWake) {
           // Daily wake checks GitHub manifest for a newer firmware.
-          // Successful update reboots before continuing.
-          checkAndApplyInternetOta();
+          // Successful update is applied, then we reboot.
+          if (runInternetOtaIfAvailable()) {
+            Serial.println("Internet OTA complete on timer wake. Rebooting...");
+            delay(200);
+            ESP.restart();
+          }
         }
 #endif
         if (!fetchAndUpdateCache(true)) {
