@@ -14,6 +14,11 @@
 #include "HT_DEPG0290BxS800FxX_BW.h"
 #include <Adafruit_LSM6DSOX.h>
 #include <driver/rtc_io.h>
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+#include "secrets.example.h"
+#endif
 
 const String FIRMWARE_VERSION = "v1.5.0";  
 
@@ -252,22 +257,10 @@ void drawStringBold(int x, int y, const String &text) {
 // Heltec Vext
 void VextON()  { pinMode(18, OUTPUT); digitalWrite(18, HIGH); }
 
-// ================= WIFI =================
-const char* wifiList[][2] = {
-  {"MKROA", "makeroanoke128"},
-  {"Root 2", "3097160510"},
-  {"Munky", "3097160510"}
-};
-const int WIFI_COUNT = 3;
-
-const char* JSON_URL = "https://diveinfo.jason-aa7.workers.dev/";
-
 // ================= OTA =================
 // Raw IMU orientation (0/90/180/270) that triggers OTA when reed is LOW
 const int OTA_ROTATION = 270;
 const uint32_t OTA_WINDOW_MS = 60000; // OTA listen window
-const char* OTA_HOSTNAME = "diveinfo-e290";
-const char* OTA_PASSWORD = "";         // Set to a non-empty string to require a password
 
 // ================= CACHED STATS (RTC) =================
 RTC_DATA_ATTR bool hasCache = false;
@@ -744,4 +737,3 @@ void setup() {
 }
 
 void loop() {}
-

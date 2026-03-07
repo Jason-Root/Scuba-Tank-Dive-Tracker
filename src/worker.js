@@ -55,14 +55,17 @@ export default {
     // -------------------------------------------------
     // Config
     // -------------------------------------------------
-    const ICS_URL =
-      "https://calendar.google.com/calendar/ical/092fc62584aa9e82bc84bc0bc4dfaec744603f10c4f647eba04e67c5994c3f76%40group.calendar.google.com/public/basic.ics";
+    const ICS_URL = env.ICS_URL;
 
     const API_BASE = "https://divelogs.de/api";
 
-    if (!env.DIVEL0GS_USER || !env.DIVEL0GS_PASS) {
+    if (!ICS_URL || !env.DIVEL0GS_USER || !env.DIVEL0GS_PASS) {
       return new Response(
-        JSON.stringify({ error: "Missing env vars" }, null, 2),
+        JSON.stringify(
+          { error: "Missing env vars (required: ICS_URL, DIVEL0GS_USER, DIVEL0GS_PASS)" },
+          null,
+          2
+        ),
         { status: 500, headers: { "Content-Type": "application/json" } }
       );
     }

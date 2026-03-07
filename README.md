@@ -11,8 +11,7 @@ It supports:
 
 ## What It Displays
 
-The firmware expects JSON data from:
-- `https://diveinfo.jason-aa7.workers.dev/`
+The firmware fetches JSON from `JSON_URL` defined in `src/secrets.h`.
 
 Expected fields:
 - `totalDives`
@@ -72,19 +71,29 @@ platformio run -e vision_master_e290_usb -t upload
 
 ## First-Time Configuration Checklist
 
-Edit `src/DiveInfoV1_3.ino`:
-- Wi-Fi list in `wifiList`
-- `JSON_URL`
-- OTA settings:
+Firmware secrets/config:
+- Copy `src/secrets.example.h` to `src/secrets.h`
+- Set your own:
+  - `wifiList`
+  - `JSON_URL`
   - `OTA_HOSTNAME`
   - `OTA_PASSWORD` (set non-empty for protection)
-  - `OTA_ROTATION` if you want a different trigger orientation
+
+Runtime settings in code (`src/DiveInfoV1_3.ino`):
+- `OTA_ROTATION` if you want a different trigger orientation
 
 Edit `platformio.ini`:
 - `upload_port` under `env:vision_master_e290` to current OTA IP shown on the device
 - `upload_port` under `env:vision_master_e290_usb` if COM port changes
 
+Worker secrets/config (`src/worker.js`):
+- Set Cloudflare Worker env vars:
+  - `ICS_URL`
+  - `DIVEL0GS_USER`
+  - `DIVEL0GS_PASS`
+
 ## Notes
 
 - `src/worker.js` is included in this repo as a Cloudflare Worker source for generating the JSON payload.
 - OTA upload requires the board to be on the OTA screen and reachable on the same network.
+- `src/secrets.h` is intentionally ignored by Git so personal Wi-Fi and endpoint values are not committed.
