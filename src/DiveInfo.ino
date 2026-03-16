@@ -280,6 +280,7 @@ const uint32_t OTA_WINDOW_MS = 60000; // OTA listen window
 
 // ================= CACHED STATS (RTC) =================
 RTC_DATA_ATTR bool hasCache = false;
+RTC_DATA_ATTR bool cachedOfflineNotice = false;
 RTC_DATA_ATTR int cachedDaysUntil = 0;
 RTC_DATA_ATTR char cachedDives[8] = "";
 RTC_DATA_ATTR char cachedMinutes[16] = "";
@@ -442,6 +443,12 @@ void showStats(const String& dives,
 
   drawStringBold(centerX, yLine + 14, nextLine);
 
+  if (cachedOfflineNotice) {
+    display.setFont(ArialMT_Plain_10);
+    display.setTextAlignment(TEXT_ALIGN_LEFT);
+    display.drawString(MARGIN_LEFT, 128 - 12, "No WiFi");
+  }
+
   display.display();
 }
 
@@ -493,6 +500,11 @@ void showStatsVertical(const String& dives,
   display.setFont(ArialMT_Plain_24);
   drawStringBold(centerX, y, String(daysUntil) + " days");
 
+  if (cachedOfflineNotice) {
+    display.setFont(ArialMT_Plain_10);
+    display.drawString(centerX, 296 - 28, "No WiFi");
+  }
+
   display.display();
 }
 
@@ -511,6 +523,7 @@ void updateCacheFromJson(const JsonDocument& doc) {
   snprintf(cachedNextDive, sizeof(cachedNextDive), "%s", nextDive.c_str());
 
   hasCache = true;
+  cachedOfflineNotice = false;
 }
 
 bool showCachedStats() {
@@ -863,10 +876,13 @@ void setup() {
     bool shouldRefresh = timerWake || !hasCache;
     if (shouldRefresh) {
       if (!connectWiFi()) {
-        display.clear();
-        drawStringBold(MARGIN_LEFT, MARGIN_TOP, "WiFi Failed");
-        display.display();
-        delay(2000);
+        Serial.println("No WiFi - showing cached stats");
+        cachedOfflineNotice = true;
+        if (!showCachedStats()) {
+          display.clear();
+          drawStringBold(MARGIN_LEFT, MARGIN_TOP, "No WiFi");
+          display.display();
+        }
       } else {
 #if INTERNET_OTA_CHECK_ON_TIMER_WAKE
         if (timerWake) {
