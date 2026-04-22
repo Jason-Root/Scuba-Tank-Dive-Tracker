@@ -15,6 +15,7 @@
 #include "HT_DEPG0290BxS800FxX_BW.h"
 #include <Adafruit_LSM6DSOX.h>
 #include <driver/rtc_io.h>
+#include <math.h>
 #if __has_include("secrets.h")
 #include "secrets.h"
 #else
@@ -230,6 +231,7 @@ const unsigned char cj_logo[] PROGMEM = {
 // ================= ORIENTATION =================
 Adafruit_LSM6DSOX sox;
 int savedRotation = 0;
+bool imuReady = false;
 
 // ================= MARGINS =================
 const int MARGIN_LEFT  = 8;
@@ -274,8 +276,11 @@ void drawStringBold(int x, int y, const String &text) {
 void VextON()  { pinMode(18, OUTPUT); digitalWrite(18, HIGH); }
 
 // ================= OTA =================
-// Raw IMU orientation (0/90/180/270) that triggers OTA when reed is LOW
-const int OTA_ROTATION = 270;
+// Hold the device upside down while the reed switch is active to enter OTA mode.
+const int OTA_TRIGGER_ROTATION = 180;
+const uint32_t OTA_TRIGGER_WINDOW_MS = 2000;
+const uint8_t ORIENTATION_SAMPLE_COUNT = 5;
+const uint16_t ORIENTATION_SAMPLE_DELAY_MS = 25;
 const uint32_t OTA_WINDOW_MS = 60000; // OTA listen window
 
 // ================= CACHED STATS (RTC) =================
@@ -287,19 +292,72 @@ RTC_DATA_ATTR char cachedDeepest[16] = "";
 RTC_DATA_ATTR char cachedNextDive[64] = "";
 
 // ================= ORIENTATION FUNCTIONS =================
-int detectOrientation() {
+int rotationBucketFromValue(int rotation) {
+  switch (rotation) {
+    case 0:   return 0;
+    case 90:  return 1;
+    case 180: return 2;
+    case 270: return 3;
+    default:  return 0;
+  }
+}
+
+int rotationValueFromBucket(int bucket) {
+  switch (bucket) {
+    case 0:   return 0;
+    case 1:   return 90;
+    case 2:   return 180;
+    case 3:   return 270;
+    default:  return 0;
+  }
+}
+
+int detectOrientationOnce(int fallbackRotation = 0) {
+  if (!imuReady) return fallbackRotation;
+
   sensors_event_t accel;
   sensors_event_t gyro;
   sensors_event_t temp;
   sox.getEvent(&accel, &gyro, &temp);
 
-  if (abs(accel.acceleration.x) > abs(accel.acceleration.y)) {
+  const float absX = fabsf(accel.acceleration.x);
+  const float absY = fabsf(accel.acceleration.y);
+
+  // If the board is between orientations, keep the last stable reading.
+  if (absX < 2.0f && absY < 2.0f) return fallbackRotation;
+  if (absX > absY * 1.15f) {
     if (accel.acceleration.x > 0) return 90;
     else return 270;
-  } else {
+  }
+  if (absY > absX * 1.15f) {
     if (accel.acceleration.y > 0) return 0;
     else return 180;
   }
+
+  return fallbackRotation;
+}
+
+int detectStableOrientation(uint8_t samples = ORIENTATION_SAMPLE_COUNT,
+                            uint16_t sampleDelayMs = ORIENTATION_SAMPLE_DELAY_MS,
+                            int fallbackRotation = 0) {
+  if (!imuReady) return fallbackRotation;
+
+  uint8_t buckets[4] = {0, 0, 0, 0};
+  int lastRotation = fallbackRotation;
+  for (uint8_t i = 0; i < samples; i++) {
+    lastRotation = detectOrientationOnce(lastRotation);
+    buckets[rotationBucketFromValue(lastRotation)]++;
+    if (i + 1 < samples) delay(sampleDelayMs);
+  }
+
+  int bestBucket = rotationBucketFromValue(fallbackRotation);
+  for (int i = 0; i < 4; i++) {
+    if (buckets[i] > buckets[bestBucket]) {
+      bestBucket = i;
+    }
+  }
+
+  return rotationValueFromBucket(bestBucket);
 }
 
 void applyRotation(int rotation) {
@@ -310,17 +368,6 @@ void applyRotation(int rotation) {
     case 180: display.screenRotate(ANGLE_180_DEGREE); break;
     case 270: display.screenRotate(ANGLE_90_DEGREE); break;
     default:  display.screenRotate(ANGLE_0_DEGREE); break;
-  }
-}
-
-// Legacy OTA trigger mapping (preserves previous 270 trigger behavior)
-int displayRotationFromRaw(int rotation) {
-  switch(rotation) {
-    case 0:   return 0;
-    case 90:  return 270;
-    case 180: return 180;
-    case 270: return 90;
-    default:  return 0;
   }
 }
 
@@ -739,10 +786,8 @@ void enterOtaMode() {
   const bool horizontal = (savedRotation == 0 || savedRotation == 180);
   const String ip = WiFi.localIP().toString();
 
-  // Update cached stats during OTA mode (force refresh)
-  fetchAndUpdateCache(true);
-
-  // Check internet OTA manifest and show status on screen.
+  // Check internet OTA manifest and show status on screen first so update mode
+  // appears quickly after the reed trigger.
   showOtaBatteryScreen(horizontal, ip, "Internet OTA", "Checking...");
   String targetVersion;
   String binUrl;
@@ -812,11 +857,12 @@ void setup() {
 
   fuelGauge.begin();
 
-  if (!sox.begin_I2C()) {
-    Serial.println("IMU not found!");
+  imuReady = sox.begin_I2C();
+  if (!imuReady) {
+    Serial.println("IMU not found! Using default rotation.");
   }
 
-  savedRotation = detectOrientation();
+  savedRotation = detectStableOrientation(ORIENTATION_SAMPLE_COUNT, ORIENTATION_SAMPLE_DELAY_MS, 0);
   applyRotation(savedRotation);
 
   // Wake cause
@@ -829,24 +875,23 @@ void setup() {
   bool timerWake = (cause == ESP_SLEEP_WAKEUP_TIMER);
 
   if (reedLow) {
-    // Give a short window to rotate into OTA orientation
+    // Give a short window to deliberately flip into the OTA orientation.
     uint32_t t0 = millis();
-    while (millis() - t0 < 1500) {
-      int rot = detectOrientation();
-      int otaRot = displayRotationFromRaw(rot);
-      if (otaRot == OTA_ROTATION) {
+    while (millis() - t0 < OTA_TRIGGER_WINDOW_MS) {
+      int rot = detectStableOrientation(4, 25, savedRotation);
+      if (rot == OTA_TRIGGER_ROTATION) {
         savedRotation = rot;
         applyRotation(savedRotation);
-        Serial.println("Reed LOW + OTA mapped rotation -> OTA mode");
+        Serial.println("Reed LOW + upside-down orientation -> OTA mode");
         enterOtaMode();
         didOta = true;
         break;
       }
-      delay(50);
+      delay(20);
     }
 
     if (!didOta) {
-      savedRotation = detectOrientation();
+      savedRotation = detectStableOrientation(ORIENTATION_SAMPLE_COUNT, ORIENTATION_SAMPLE_DELAY_MS, savedRotation);
       applyRotation(savedRotation);
       showCachedStats();
       Serial.println("Reed LOW -> Sleep");

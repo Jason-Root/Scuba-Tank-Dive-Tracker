@@ -39,11 +39,13 @@ Expected fields:
 ## Magnet / Orientation Behavior
 
 - Reed switch LOW opens a short orientation check window.
-- OTA mode is entered when rotation matches `OTA_ROTATION` (currently `270` in code trigger logic).
+- OTA mode is entered when the device is held upside down during the reed-switch window.
+- Orientation is sampled a few times before deciding, which makes sideways rotation snappier and OTA entry more deliberate.
 - Side orientations are rendered at 90-degree display orientation to avoid showing a 270-degree-rendered screen.
 
 Relevant constants in `src/DiveInfo.ino`:
-- `OTA_ROTATION`
+- `OTA_TRIGGER_ROTATION`
+- `OTA_TRIGGER_WINDOW_MS`
 - `OTA_WINDOW_MS`
 - `WAKE_PIN`
 
