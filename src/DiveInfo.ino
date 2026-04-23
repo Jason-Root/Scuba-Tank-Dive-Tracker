@@ -276,9 +276,8 @@ void drawStringBold(int x, int y, const String &text) {
 void VextON()  { pinMode(18, OUTPUT); digitalWrite(18, HIGH); }
 
 // ================= OTA =================
-// Hold the device upside down while the reed switch is active to enter OTA mode.
-const int OTA_TRIGGER_ROTATION = 180;
-const uint32_t OTA_TRIGGER_WINDOW_MS = 2000;
+// Hold the reed switch closed for a few seconds to deliberately enter OTA mode.
+const uint32_t OTA_TRIGGER_HOLD_MS = 10000;
 const uint8_t ORIENTATION_SAMPLE_COUNT = 5;
 const uint16_t ORIENTATION_SAMPLE_DELAY_MS = 25;
 const uint32_t OTA_WINDOW_MS = 60000; // OTA listen window
@@ -706,16 +705,77 @@ bool runInternetOtaIfAvailable() {
 }
 
 // ================= WIFI =================
-bool connectWiFi() {
-  for (int i = 0; i < WIFI_COUNT; i++) {
-    WiFi.begin(wifiList[i][0], wifiList[i][1]);
-    int tries = 0;
-    while (WiFi.status() != WL_CONNECTED && tries < 30) {
-      delay(250);
-      tries++;
-    }
-    if (WiFi.status() == WL_CONNECTED) return true;
+const uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
+const uint16_t WIFI_CONNECT_POLL_MS = 250;
+
+const char* wifiStatusLabel(wl_status_t status) {
+  switch (status) {
+    case WL_IDLE_STATUS:     return "Idle";
+    case WL_NO_SSID_AVAIL:   return "SSID Not Found";
+    case WL_SCAN_COMPLETED:  return "Scan Complete";
+    case WL_CONNECTED:       return "Connected";
+    case WL_CONNECT_FAILED:  return "Auth Failed";
+    case WL_CONNECTION_LOST: return "Connection Lost";
+    case WL_DISCONNECTED:    return "Disconnected";
+    default:                 return "Unknown";
   }
+}
+
+bool connectWiFi(String* connectedSsid = nullptr, String* failureReason = nullptr) {
+  if (connectedSsid) *connectedSsid = "";
+  if (failureReason) *failureReason = "";
+
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  if (OTA_HOSTNAME && OTA_HOSTNAME[0] != '\0') {
+    WiFi.setHostname(OTA_HOSTNAME);
+  }
+  delay(100);
+
+  for (int i = 0; i < WIFI_COUNT; i++) {
+    const char* ssid = wifiList[i][0];
+    wl_status_t status = WL_IDLE_STATUS;
+
+    Serial.printf("WiFi: trying %s\n", ssid);
+    WiFi.disconnect(false, true);
+    delay(100);
+    WiFi.begin(ssid, wifiList[i][1]);
+
+    uint32_t started = millis();
+    while (millis() - started < WIFI_CONNECT_TIMEOUT_MS) {
+      status = WiFi.status();
+      if (status == WL_CONNECTED) {
+        if (connectedSsid) *connectedSsid = ssid;
+        if (failureReason) *failureReason = "";
+        Serial.printf(
+          "WiFi: connected to %s, IP=%s\n",
+          ssid,
+          WiFi.localIP().toString().c_str()
+        );
+        return true;
+      }
+
+      if (status == WL_NO_SSID_AVAIL || status == WL_CONNECT_FAILED || status == WL_CONNECTION_LOST) {
+        break;
+      }
+
+      delay(WIFI_CONNECT_POLL_MS);
+    }
+
+    if (connectedSsid) *connectedSsid = ssid;
+    if (failureReason) {
+      if (status == WL_IDLE_STATUS || status == WL_DISCONNECTED) {
+        *failureReason = "Timeout";
+      } else {
+        *failureReason = wifiStatusLabel(status);
+      }
+    }
+    Serial.printf("WiFi: %s failed (%s)\n", ssid, wifiStatusLabel(status));
+  }
+
   return false;
 }
 
@@ -771,15 +831,45 @@ void showOtaBatteryScreen(bool horizontal, const String &ip, const String &statu
   display.display();
 }
 
+void showOtaHoldScreen(uint32_t elapsedMs) {
+  const bool horizontal = (savedRotation == 0 || savedRotation == 180);
+  const int centerX = horizontal ? (296 / 2) : (128 / 2);
+  const int titleY = horizontal ? 46 : 104;
+  const int statusY = horizontal ? 70 : 132;
+  const int hintY = horizontal ? 88 : 156;
+  const uint32_t remainingMs = (elapsedMs >= OTA_TRIGGER_HOLD_MS) ? 0 : (OTA_TRIGGER_HOLD_MS - elapsedMs);
+  const uint32_t remainingSeconds = (remainingMs + 999) / 1000;
+
+  display.clear();
+  display.setTextAlignment(TEXT_ALIGN_CENTER);
+  display.setFont(ArialMT_Plain_16);
+  display.drawString(centerX, titleY, "Hold for OTA");
+  display.setFont(ArialMT_Plain_10);
+  display.drawString(centerX, statusY, String(remainingSeconds) + "s remaining");
+  display.drawString(centerX, hintY, "Release to skip");
+  display.display();
+}
+
 void enterOtaMode() {
-  if (!connectWiFi()) {
+  String wifiSsid;
+  String wifiFailure;
+  if (!connectWiFi(&wifiSsid, &wifiFailure)) {
+    const bool horizontal = (savedRotation == 0 || savedRotation == 180);
+    const int centerX = horizontal ? (296 / 2) : (128 / 2);
     display.clear();
     display.setTextAlignment(TEXT_ALIGN_CENTER);
     display.setFont(ArialMT_Plain_16);
-    display.drawString(296 / 2, 50, "WiFi Failed");
-    display.drawString(296 / 2, 70, "OTA Aborted");
+    display.drawString(centerX, 50, "WiFi Failed");
+    display.setFont(ArialMT_Plain_10);
+    if (wifiSsid.length()) {
+      display.drawString(centerX, 74, wifiSsid);
+    }
+    if (wifiFailure.length()) {
+      display.drawString(centerX, 86, wifiFailure);
+    }
+    display.drawString(centerX, 102, "OTA Aborted");
     display.display();
-    delay(2000);
+    delay(3000);
     return;
   }
 
@@ -875,14 +965,21 @@ void setup() {
   bool timerWake = (cause == ESP_SLEEP_WAKEUP_TIMER);
 
   if (reedLow) {
-    // Give a short window to deliberately flip into the OTA orientation.
+    // A long reed hold enters OTA mode; a short trigger just wakes the display.
     uint32_t t0 = millis();
-    while (millis() - t0 < OTA_TRIGGER_WINDOW_MS) {
-      int rot = detectStableOrientation(4, 25, savedRotation);
-      if (rot == OTA_TRIGGER_ROTATION) {
-        savedRotation = rot;
-        applyRotation(savedRotation);
-        Serial.println("Reed LOW + upside-down orientation -> OTA mode");
+    uint32_t lastShownSeconds = UINT32_MAX;
+    showOtaHoldScreen(0);
+    while (digitalRead(WAKE_PIN) == LOW) {
+      uint32_t elapsed = millis() - t0;
+      uint32_t remainingMs = (elapsed >= OTA_TRIGGER_HOLD_MS) ? 0 : (OTA_TRIGGER_HOLD_MS - elapsed);
+      uint32_t remainingSeconds = (remainingMs + 999) / 1000;
+      if (remainingSeconds != lastShownSeconds) {
+        showOtaHoldScreen(elapsed);
+        lastShownSeconds = remainingSeconds;
+      }
+
+      if (elapsed >= OTA_TRIGGER_HOLD_MS) {
+        Serial.println("Reed LOW held for OTA -> OTA mode");
         enterOtaMode();
         didOta = true;
         break;
@@ -907,11 +1004,20 @@ void setup() {
     // ---- normal main flow ----
     bool shouldRefresh = timerWake || !hasCache;
     if (shouldRefresh) {
-      if (!connectWiFi()) {
+      String wifiSsid;
+      String wifiFailure;
+      if (!connectWiFi(&wifiSsid, &wifiFailure)) {
         display.clear();
         drawStringBold(MARGIN_LEFT, MARGIN_TOP, "WiFi Failed");
+        display.setFont(ArialMT_Plain_10);
+        if (wifiSsid.length()) {
+          display.drawString(MARGIN_LEFT, MARGIN_TOP + 24, wifiSsid);
+        }
+        if (wifiFailure.length()) {
+          display.drawString(MARGIN_LEFT, MARGIN_TOP + 38, wifiFailure);
+        }
         display.display();
-        delay(2000);
+        delay(3000);
       } else {
 #if INTERNET_OTA_CHECK_ON_TIMER_WAKE
         if (timerWake) {
