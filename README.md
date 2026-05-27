@@ -45,14 +45,8 @@ The Vision Master E290 battery sense path uses:
 If the estimated battery is at or below `LOW_BATTERY_PERCENT`, the daily update
 shows only a battery symbol and `charge now` instead of dive stats.
 
-## Build
+## Build And Upload
 
-```powershell
-pio run -e vision_master_e290
-```
-
-Upload:
-
-```powershell
-pio run -e vision_master_e290 -t upload
-```
+Open `DiveInfoV1_3.ino` in the Arduino IDE, select the Heltec Vision Master
+E290 / ESP32-S3 board support you use for your device, edit the settings block,
+then upload over USB.
