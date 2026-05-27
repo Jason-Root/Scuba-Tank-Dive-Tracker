@@ -34,9 +34,6 @@ then choose `SCREEN_ROTATION` as `0`, `90`, `180`, or `270`.
 
 The ESP32-S3 only supports 2.4 GHz WiFi.
 
-Do not commit real WiFi passwords or Subsurface credentials to GitHub. Fill
-them in locally before flashing your own device.
-
 ## Battery
 
 The Vision Master E290 battery sense path uses:
