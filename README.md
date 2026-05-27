@@ -9,7 +9,7 @@ or optional reed-switch wake.
 
 ## Configure
 
-Edit the `EDIT THESE SETTINGS` section near the top of `DiveInfoV1_3.ino`.
+Edit the `EDIT THESE SETTINGS` section near the top of `Scuba_Tank_Dive_Tracker.ino`.
 Most users should only need this block:
 
 ```cpp
@@ -47,6 +47,6 @@ shows only a battery symbol and `charge now` instead of dive stats.
 
 ## Build And Upload
 
-Open `DiveInfoV1_3.ino` in the Arduino IDE, select the Heltec Vision Master
+Open `Scuba_Tank_Dive_Tracker.ino` in the Arduino IDE, select the Heltec Vision Master
 E290 / ESP32-S3 board support you use for your device, edit the settings block,
 then upload over USB.
