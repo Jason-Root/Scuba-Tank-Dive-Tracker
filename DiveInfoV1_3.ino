@@ -1,0 +1,1202 @@
+/*
+   Heltec Vision Master E290 / ESP32-S3
+   Main Dive Display
+   Pulls dive stats directly from Subsurface Cloud
+*/
+
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <Wire.h>
+#include "HT_DEPG0290BxS800FxX_BW.h"
+#include <Adafruit_LSM6DSOX.h>
+#include <driver/rtc_io.h>
+#include <ctype.h>
+#include <limits.h>
+#include <time.h>
+
+// ================= EDIT THESE SETTINGS =================
+// You should only need to change this block before flashing.
+
+const char* WIFI_NAME = "YOUR_2G_WIFI_NAME";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+
+const char* SUBSURFACE_USERNAME = "";
+const char* SUBSURFACE_PASSWORD = "";
+
+// Optional public .ics calendar link. Leave blank to disable the next-dive line.
+const char* CALENDAR_LINK = "";
+
+// Set to false if your build does not have a magnetic reed switch.
+const bool USE_REED_SWITCH = true;
+
+// Set to false if your build does not have the 9DOF/IMU rotation sensor.
+const bool USE_AUTO_ROTATION = true;
+const int SCREEN_ROTATION = 0;  // Used when auto rotation is off: 0, 90, 180, or 270.
+
+// At or below this percent, the display shows only "charge now".
+const int LOW_BATTERY_PERCENT = 10;
+
+// ================= INTERNAL SETTINGS =================
+const String FIRMWARE_VERSION = "v1.3.0";
+const char* FIRMWARE_BUILD = __DATE__ " " __TIME__;
+const char* SUBSURFACE_BASE = "https://cloud.subsurface-divelog.org";
+const char* LOCAL_TIMEZONE = "EST5EDT,M3.2.0/2,M11.1.0/2";
+const char* NTP_SERVER = "pool.ntp.org";
+
+const char* WIFI_NETWORKS[][2] = {
+  {WIFI_NAME, WIFI_PASSWORD}
+};
+const int WIFI_COUNT = sizeof(WIFI_NETWORKS) / sizeof(WIFI_NETWORKS[0]);
+
+const int VBAT_READ_PIN = 7;
+const int VEXT_CTRL_PIN = 18;
+const int BATTERY_CTRL_PIN = 46;
+const float BATTERY_ADC_MULTIPLIER = 4.90f;
+const uint8_t BATTERY_SAMPLE_COUNT = 16;
+
+const int WAKE_PIN = 17;
+const int SDA_PIN = 39;
+const int SCL_PIN = 38;
+const int DISPLAY_CS_PIN = 5;
+const int DISPLAY_DC_PIN = 4;
+const int DISPLAY_RST_PIN = 3;
+const int DISPLAY_BUSY_PIN = 6;
+const int DISPLAY_SCK_PIN = 2;
+const int DISPLAY_MOSI_PIN = 1;
+const int DISPLAY_POWER_PIN = -1;
+const uint32_t DISPLAY_SPI_FREQUENCY = 6000000;
+
+const int LOGO_W = 128;
+const int LOGO_H = 128;
+
+// ================= HARDWARE =================
+DEPG0290BxS800FxX_BW display(
+  DISPLAY_CS_PIN,
+  DISPLAY_DC_PIN,
+  DISPLAY_RST_PIN,
+  DISPLAY_BUSY_PIN,
+  DISPLAY_SCK_PIN,
+  DISPLAY_MOSI_PIN,
+  DISPLAY_POWER_PIN,
+  DISPLAY_SPI_FREQUENCY
+);
+
+float lastBatteryRaw = 0.0f;
+float lastBatteryAdcMillivolts = 0.0f;
+
+// ================= LOGO PLACEHOLDER =================
+
+const unsigned char cj_logo[] PROGMEM = {
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0xff, 0xff, 0x1f, 0x00, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0xff, 0x7f, 0x00, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8, 0xff, 0xff, 0xff,
+   0x01, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0xfc, 0xff, 0xff, 0xff, 0x03, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff, 0x07, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+   0x0f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
+   0xff, 0xff, 0xff, 0xff, 0x1f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x80, 0xff, 0xff, 0xff, 0xff, 0x1f, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0xff, 0xff, 0xff, 0xff,
+   0x3f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0,
+   0xff, 0xff, 0xff, 0xff, 0x3f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xc0, 0xff, 0xff, 0xff, 0xff, 0x7f, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0xff, 0xff, 0xff,
+   0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0x1f, 0x80, 0xff, 0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xe0, 0xff, 0x0f, 0x00, 0xfe, 0x7f, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0x07, 0x00, 0xfc,
+   0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0x03, 0x00, 0xfc, 0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xe0, 0xff, 0x03, 0x00, 0xf8, 0x7f, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xf8,
+   0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0x01, 0x00, 0xf8, 0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xf8, 0x7f, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xf8,
+   0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0x01, 0x00, 0xf8, 0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xf8, 0x7f, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xf8,
+   0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0x01, 0x00, 0xf8, 0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xf8, 0x3f, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xf8,
+   0x1f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0x01, 0x00, 0xf8, 0x0f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xf8, 0x07, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xf8,
+   0x03, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0x01, 0x00, 0xf8, 0x01, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xf8, 0x00, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0x38,
+   0x00, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0x01, 0x00, 0x18, 0x00, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0x00, 0x00, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0x00,
+   0x00, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0x01, 0x00, 0x00, 0x00, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0x00, 0x00, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0x00,
+   0x00, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0x01, 0x00, 0x00, 0x00, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0x00, 0x00, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0x00,
+   0x00, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0x01, 0x00, 0x00, 0x40, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0x00, 0x60, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0x00,
+   0x78, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0x01, 0x00, 0x00, 0x7c, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0x00, 0x7e, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0x00,
+   0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0x01, 0x00, 0x80, 0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xc0, 0x7f, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xe0,
+   0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0x01, 0x00, 0xf0, 0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xf8, 0x7f, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xf8,
+   0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0x01, 0x00, 0xf8, 0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xf8, 0x7f, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xf8,
+   0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0x01, 0x00, 0xf8, 0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xf8, 0x7f, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xf8,
+   0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0x01, 0x00, 0xf8, 0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xf8, 0x7f, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xf8,
+   0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0x01, 0x00, 0xf8, 0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xf8, 0x7f, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0x01, 0x00, 0xf8,
+   0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0x03, 0x00, 0xf8, 0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xe0, 0xff, 0x03, 0x00, 0xfc, 0x7f, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0x07, 0x00, 0xfc,
+   0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0x0f, 0x00, 0xff, 0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xe0, 0xff, 0x3f, 0xc0, 0xff, 0x7f, 0x00, 0xf8, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0xff, 0xff, 0xff,
+   0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0,
+   0xff, 0xff, 0xff, 0xff, 0x7f, 0x00, 0xf8, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0xc0, 0xff, 0xff, 0xff, 0xff, 0x7f, 0x00, 0xfc, 0x7f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0xff, 0xff, 0xff, 0xff,
+   0x3f, 0x00, 0xfc, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
+   0xff, 0xff, 0xff, 0xff, 0x3f, 0x00, 0xfe, 0x7f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x80, 0xff, 0xff, 0xff, 0xff, 0x1f, 0x00, 0xfe, 0x3f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+   0x0f, 0x00, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0xfe, 0xff, 0xff, 0xff, 0x0f, 0x80, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0xfc, 0xff, 0xff, 0xff, 0x03, 0xc0, 0xff, 0x1f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8, 0xff, 0xff, 0xff,
+   0x01, 0xf0, 0xff, 0x1f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0xe0, 0xff, 0xff, 0xff, 0x00, 0xf8, 0xff, 0x0f, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0xff, 0x1f, 0x00, 0xfc, 0xff, 0x0f,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0xfe, 0xff, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x03, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0xff, 0x03,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0xc0, 0xff, 0xff, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0xf0, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8, 0xff, 0x3f, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0xfc, 0xff, 0x1f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0xfe, 0xff, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+// ================= ORIENTATION =================
+Adafruit_LSM6DSOX sox;
+int savedRotation = 0;
+
+// ================= MARGINS =================
+const int MARGIN_LEFT  = 8;
+const int MARGIN_RIGHT = 10;
+const int MARGIN_TOP   = 10;
+// helper: make WAKE_PIN stable as an EXT1 wake source
+static void setupWakePinRTC(gpio_num_t pin) {
+  // Route pin through RTC domain (required for reliable EXT1)
+  rtc_gpio_deinit(pin);
+  rtc_gpio_set_direction(pin, RTC_GPIO_MODE_INPUT_ONLY);
+
+  // Enable RTC pullup so it stays HIGH in deep sleep when reed is open
+  rtc_gpio_pullup_en(pin);
+  rtc_gpio_pulldown_dis(pin);
+
+  // Hold the RTC configuration through deep sleep
+  rtc_gpio_hold_en(pin);
+}
+
+// helper: release hold after waking (optional but good practice)
+static void releaseWakePinRTC(gpio_num_t pin) {
+  rtc_gpio_hold_dis(pin);
+}
+
+static bool confirmedLow(uint32_t ms = 60) {
+  uint32_t t0 = millis();
+  while (millis() - t0 < ms) {
+    if (digitalRead(WAKE_PIN) != LOW) return false;
+    delay(2);
+  }
+  return true;
+}
+// Fake bold helper
+void drawStringBold(int x, int y, const String &text) {
+  display.drawString(x, y, text);
+  display.drawString(x + 1, y, text);
+  display.drawString(x, y + 1, text);
+  display.drawString(x + 1, y + 1, text);
+}
+
+// Heltec Vision Master E290 peripheral rails.
+void VextON() {
+  pinMode(VEXT_CTRL_PIN, OUTPUT);
+  digitalWrite(VEXT_CTRL_PIN, HIGH);
+}
+
+void VextOFF() {
+  pinMode(VEXT_CTRL_PIN, OUTPUT);
+  digitalWrite(VEXT_CTRL_PIN, LOW);
+  pinMode(BATTERY_CTRL_PIN, INPUT_PULLDOWN);
+}
+
+void initBatteryMonitor() {
+  analogReadResolution(12);
+  analogSetPinAttenuation(VBAT_READ_PIN, ADC_11db);
+  pinMode(BATTERY_CTRL_PIN, INPUT_PULLUP);
+  pinMode(VBAT_READ_PIN, INPUT);
+  VextON();
+}
+
+float readBatteryVoltage() {
+  VextON();
+  pinMode(BATTERY_CTRL_PIN, INPUT_PULLUP);
+  pinMode(VBAT_READ_PIN, INPUT);
+  delay(50);
+
+  uint32_t rawSum = 0;
+  uint32_t millivoltSum = 0;
+
+  for (uint8_t i = 0; i < BATTERY_SAMPLE_COUNT; i++) {
+    rawSum += analogRead(VBAT_READ_PIN);
+    millivoltSum += analogReadMilliVolts(VBAT_READ_PIN);
+    delay(2);
+  }
+
+  float rawAverage = rawSum / (float)BATTERY_SAMPLE_COUNT;
+  float adcMillivolts = millivoltSum / (float)BATTERY_SAMPLE_COUNT;
+  lastBatteryRaw = rawAverage;
+  lastBatteryAdcMillivolts = adcMillivolts;
+  float voltage = (adcMillivolts * BATTERY_ADC_MULTIPLIER) / 1000.0f;
+
+  Serial.printf("Battery ADC raw=%.0f adc=%.0f mV battery=%.2f V\n",
+                rawAverage,
+                adcMillivolts,
+                voltage);
+
+  return voltage;
+}
+
+int estimateBatteryPercent(float voltage) {
+  float percent;
+
+  if (voltage >= 4.20f) {
+    percent = 100.0f;
+  } else if (voltage >= 4.00f) {
+    percent = 80.0f + ((voltage - 4.00f) / 0.20f) * 20.0f;
+  } else if (voltage >= 3.85f) {
+    percent = 55.0f + ((voltage - 3.85f) / 0.15f) * 25.0f;
+  } else if (voltage >= 3.75f) {
+    percent = 35.0f + ((voltage - 3.75f) / 0.10f) * 20.0f;
+  } else if (voltage >= 3.65f) {
+    percent = 15.0f + ((voltage - 3.65f) / 0.10f) * 20.0f;
+  } else if (voltage >= 3.30f) {
+    percent = ((voltage - 3.30f) / 0.35f) * 15.0f;
+  } else {
+    percent = 0.0f;
+  }
+
+  return (int)(constrain(percent, 0.0f, 100.0f) + 0.5f);
+}
+
+// ================= ORIENTATION FUNCTIONS =================
+int normalizeRotation(int rotation) {
+  if (rotation == 90 || rotation == 180 || rotation == 270) return rotation;
+  return 0;
+}
+
+int detectOrientation() {
+  if (!USE_AUTO_ROTATION) {
+    return normalizeRotation(SCREEN_ROTATION);
+  }
+
+  sensors_event_t accel;
+  sensors_event_t gyro;
+  sensors_event_t temp;
+  sox.getEvent(&accel, &gyro, &temp);
+
+  if (abs(accel.acceleration.x) > abs(accel.acceleration.y)) {
+    if (accel.acceleration.x > 0) return 90;
+    else return 270;
+  } else {
+    if (accel.acceleration.y > 0) return 0;
+    else return 180;
+  }
+}
+
+void applyRotation(int rotation) {
+  switch(rotation) {
+    case 0:   display.screenRotate(ANGLE_0_DEGREE); break;
+    case 90:  display.screenRotate(ANGLE_270_DEGREE); break;
+    case 180: display.screenRotate(ANGLE_180_DEGREE); break;
+    case 270: display.screenRotate(ANGLE_90_DEGREE); break;
+    default:  display.screenRotate(ANGLE_0_DEGREE); break;
+  }
+}
+
+// ================= LOW BATTERY SCREEN =================
+bool isHorizontalRotation() {
+  return savedRotation == 0 || savedRotation == 180;
+}
+
+void drawBatterySymbol(int x, int y, int w, int h) {
+  display.drawRect(x, y, w, h);
+  display.drawRect(x + w, y + h / 4, 5, h / 2);
+  display.fillRect(x + 4, y + 4, max(3, w / 8), h - 8);
+}
+
+void showChargeNowScreen() {
+  display.clear();
+  display.setTextAlignment(TEXT_ALIGN_CENTER);
+
+  if (isHorizontalRotation()) {
+    drawBatterySymbol(100, 24, 88, 38);
+    display.setFont(ArialMT_Plain_24);
+    drawStringBold(148, 76, "charge now");
+  } else {
+    drawBatterySymbol(34, 78, 56, 28);
+    display.setFont(ArialMT_Plain_24);
+    drawStringBold(64, 124, "charge");
+    drawStringBold(64, 156, "now");
+  }
+
+  display.display();
+}
+
+// ================= MAIN DISPLAY =================
+void showStats(const String& dives,
+               const String& minutes,
+               const String& deepest,
+               int daysUntil,
+               const String& nextDive) {
+  display.clear();
+  display.setFont(ArialMT_Plain_16);
+
+  const int screenW = 296;
+  const int innerW = screenW - MARGIN_LEFT - MARGIN_RIGHT;
+  const int centerX = MARGIN_LEFT + (innerW / 2);
+
+  display.setTextAlignment(TEXT_ALIGN_LEFT);
+  drawStringBold(MARGIN_LEFT, MARGIN_TOP, dives + " Dives Total");
+
+  display.setTextAlignment(TEXT_ALIGN_RIGHT);
+  drawStringBold(screenW - MARGIN_RIGHT, MARGIN_TOP,
+                 "Deepest Dive: " + deepest + " ");
+
+  display.setTextAlignment(TEXT_ALIGN_CENTER);
+  drawStringBold(centerX, MARGIN_TOP + 30,
+                 "Spent " + minutes + " Underwater");
+
+  const int gapW = 140;
+  const int yLine = MARGIN_TOP + 70;
+
+  display.drawHorizontalLine(MARGIN_LEFT, yLine, centerX - gapW / 2 - MARGIN_LEFT);
+  display.drawHorizontalLine(centerX + gapW / 2, yLine,
+                             (screenW - MARGIN_RIGHT) - (centerX + gapW / 2));
+
+  drawStringBold(centerX, yLine - 9, "Next dive in:");
+
+  String nextLine = String(daysUntil) + " days  -  " + nextDive;
+  if (nextLine.length() > 36) nextLine = nextLine.substring(0,33) + "...";
+
+  drawStringBold(centerX, yLine + 14, nextLine);
+
+  display.display();
+}
+
+void showStatsVertical(const String& dives,
+                       const String& minutes,
+                       const String& deepest,
+                       int daysUntil,
+                       const String& nextDive)
+{
+  display.clear();
+
+  const int centerX = 128 / 2;   // vertical screen width
+  int y = 35;
+
+  display.setTextAlignment(TEXT_ALIGN_CENTER);
+
+  // ---------- TOTAL DIVES ----------
+  display.setFont(ArialMT_Plain_16);
+  display.drawString(centerX, y, "Total Dives");
+  y += 20;
+
+  display.setFont(ArialMT_Plain_24);
+  drawStringBold(centerX, y, dives);
+  y += 36;
+
+  // ---------- DEEPEST DIVE ----------
+  display.setFont(ArialMT_Plain_16);
+  display.drawString(centerX, y, "Deepest Dive");
+  y += 20;
+
+  display.setFont(ArialMT_Plain_24);
+  drawStringBold(centerX, y, deepest);
+  y += 36;
+
+  // ---------- UNDERWATER ----------
+  display.setFont(ArialMT_Plain_16);
+  display.drawString(centerX, y, "Time Underwater");
+  y += 20;
+
+  display.setFont(ArialMT_Plain_24);
+  drawStringBold(centerX, y, minutes);
+  y += 36;
+
+  // ---------- NEXT DIVE ----------
+  display.setFont(ArialMT_Plain_16);
+  display.drawString(centerX, y, "Next Dive In");
+  y += 20;
+
+  display.setFont(ArialMT_Plain_24);
+  drawStringBold(centerX, y, String(daysUntil) + " days");
+
+  display.display();
+}
+
+void showUpdateError(const String& message) {
+  display.clear();
+  display.setTextAlignment(TEXT_ALIGN_CENTER);
+
+  if (isHorizontalRotation()) {
+    display.setFont(ArialMT_Plain_24);
+    drawStringBold(148, 34, "Update Failed");
+    display.setFont(ArialMT_Plain_10);
+    display.drawString(148, 76, message.substring(0, 38));
+  } else {
+    display.setFont(ArialMT_Plain_24);
+    drawStringBold(64, 78, "Update");
+    drawStringBold(64, 110, "Failed");
+    display.setFont(ArialMT_Plain_10);
+    display.drawString(64, 154, message.substring(0, 18));
+  }
+
+  display.display();
+}
+
+// ================= WIFI DEBUG =================
+const uint8_t WIFI_DEBUG_MAX_LINES = 10;
+String wifiDebugLines[WIFI_DEBUG_MAX_LINES];
+uint8_t wifiDebugLineCount = 0;
+
+void addWiFiDebugLine(const String& line) {
+  if (wifiDebugLineCount < WIFI_DEBUG_MAX_LINES) {
+    wifiDebugLines[wifiDebugLineCount++] = line;
+  }
+}
+
+String wifiStatusText(wl_status_t status) {
+  switch (status) {
+    case WL_IDLE_STATUS: return "idle";
+    case WL_NO_SSID_AVAIL: return "no ssid";
+    case WL_SCAN_COMPLETED: return "scan done";
+    case WL_CONNECTED: return "connected";
+    case WL_CONNECT_FAILED: return "bad pass/auth";
+    case WL_CONNECTION_LOST: return "lost";
+    case WL_DISCONNECTED: return "disconnected";
+    default: return "status " + String((int)status);
+  }
+}
+
+void showWiFiFailureScreen() {
+  display.clear();
+  display.setTextAlignment(TEXT_ALIGN_LEFT);
+  display.setFont(ArialMT_Plain_10);
+  display.drawString(0, 0, "WiFi failed - 2.4GHz only");
+  display.drawString(0, 12, String("Build ") + FIRMWARE_BUILD);
+
+  for (uint8_t i = 0; i < wifiDebugLineCount; i++) {
+    display.drawString(0, 25 + i * 10, wifiDebugLines[i]);
+  }
+
+  display.display();
+}
+
+// ================= DIVE DATA =================
+struct DiveInfo {
+  bool ok = false;
+  String error;
+  String totalDives = "0";
+  String totalMinutesUnderwater = "0 min";
+  String deepestDive = "0 ft";
+  String nextDive = "No dive trips planned";
+  int daysUntil = 0;
+};
+
+String formatMinutes(int minutes) {
+  int min = max(0, minutes);
+  if (min < 60) return String(min) + " min";
+
+  int h = min / 60;
+  int m = min % 60;
+  return m == 0 ? String(h) + " h" : String(h) + " h " + String(m) + " min";
+}
+
+int metersToFeet(float meters) {
+  return (int)(meters * 3.28084f + 0.5f);
+}
+
+String urlEncode(const String& value) {
+  const char hex[] = "0123456789ABCDEF";
+  String encoded;
+
+  for (size_t i = 0; i < value.length(); i++) {
+    uint8_t c = (uint8_t)value[i];
+    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      encoded += (char)c;
+    } else if (c == ' ') {
+      encoded += '+';
+    } else {
+      encoded += '%';
+      encoded += hex[c >> 4];
+      encoded += hex[c & 0x0F];
+    }
+  }
+
+  return encoded;
+}
+
+String findCsrfToken(const String& html) {
+  int nameAt = html.indexOf("name=\"csrf_token\"");
+  if (nameAt < 0) nameAt = html.indexOf("name='csrf_token'");
+  if (nameAt < 0) return "";
+
+  int tagStart = html.lastIndexOf('<', nameAt);
+  int tagEnd = html.indexOf('>', nameAt);
+  if (tagStart < 0 || tagEnd < 0) return "";
+
+  String tag = html.substring(tagStart, tagEnd + 1);
+  int valueAt = tag.indexOf("value=\"");
+  char quote = '"';
+  if (valueAt < 0) {
+    valueAt = tag.indexOf("value='");
+    quote = '\'';
+  }
+  if (valueAt < 0) return "";
+
+  valueAt += 7;
+  int valueEnd = tag.indexOf(quote, valueAt);
+  if (valueEnd < 0) return "";
+  return tag.substring(valueAt, valueEnd);
+}
+
+const char* SUBSURFACE_HEADER_KEYS[] = {"Set-Cookie"};
+const size_t SUBSURFACE_HEADER_COUNT = sizeof(SUBSURFACE_HEADER_KEYS) / sizeof(SUBSURFACE_HEADER_KEYS[0]);
+
+String cookiePairFromSetCookie(const String& setCookie) {
+  String pair = setCookie;
+  int semi = pair.indexOf(';');
+  if (semi >= 0) pair = pair.substring(0, semi);
+  pair.trim();
+
+  int equals = pair.indexOf('=');
+  if (equals <= 0) return "";
+  return pair;
+}
+
+void updateCookieHeader(String& cookieHeader, const String& setCookie) {
+  String pair = cookiePairFromSetCookie(setCookie);
+  if (pair.length() == 0) return;
+
+  int equals = pair.indexOf('=');
+  String name = pair.substring(0, equals);
+
+  int start = 0;
+  while (start < (int)cookieHeader.length()) {
+    int end = cookieHeader.indexOf("; ", start);
+    if (end < 0) end = cookieHeader.length();
+
+    String existing = cookieHeader.substring(start, end);
+    int existingEquals = existing.indexOf('=');
+    if (existingEquals > 0 && existing.substring(0, existingEquals) == name) {
+      String before = start > 0 ? cookieHeader.substring(0, start) : "";
+      String after = end < (int)cookieHeader.length() ? cookieHeader.substring(end + 2) : "";
+
+      cookieHeader = before;
+      if (cookieHeader.length() > 0) cookieHeader += "; ";
+      cookieHeader += pair;
+      if (after.length() > 0) {
+        cookieHeader += "; ";
+        cookieHeader += after;
+      }
+      return;
+    }
+
+    start = end + 2;
+  }
+
+  if (cookieHeader.length() > 0) cookieHeader += "; ";
+  cookieHeader += pair;
+}
+
+void addCookieHeader(HTTPClient& http, const String& cookieHeader) {
+  if (cookieHeader.length() > 0) {
+    http.addHeader("Cookie", cookieHeader);
+  }
+}
+
+bool syncClock() {
+  setenv("TZ", LOCAL_TIMEZONE, 1);
+  tzset();
+  configTime(0, 0, NTP_SERVER);
+
+  for (uint8_t i = 0; i < 20; i++) {
+    time_t now = time(nullptr);
+    if (now > 1700000000) return true;
+    delay(500);
+  }
+
+  return false;
+}
+
+long daysFromCivil(int y, unsigned m, unsigned d) {
+  y -= m <= 2;
+  const long era = (y >= 0 ? y : y - 399) / 400;
+  const unsigned yoe = (unsigned)(y - era * 400);
+  const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097L + (long)doe - 719468L;
+}
+
+long todayDays() {
+  time_t now = time(nullptr);
+  struct tm local;
+  localtime_r(&now, &local);
+  return daysFromCivil(local.tm_year + 1900, local.tm_mon + 1, local.tm_mday);
+}
+
+String nextUnfoldedIcsLine(const String& text, int& pos) {
+  String line;
+
+  while (pos < (int)text.length()) {
+    int end = text.indexOf('\n', pos);
+    if (end < 0) end = text.length();
+
+    String part = text.substring(pos, end);
+    part.trim();
+    pos = end + 1;
+
+    if (part.length() == 0) continue;
+    line = part;
+    break;
+  }
+
+  while (pos < (int)text.length()) {
+    int end = text.indexOf('\n', pos);
+    if (end < 0) end = text.length();
+
+    String peek = text.substring(pos, end);
+    if (!(peek.startsWith(" ") || peek.startsWith("\t"))) break;
+
+    peek.remove(0, 1);
+    peek.trim();
+    line += peek;
+    pos = end + 1;
+  }
+
+  return line;
+}
+
+String cleanIcsText(String value) {
+  value.replace("\\,", ",");
+  value.replace("\\;", ";");
+  value.replace("\\n", " ");
+  value.replace("\\N", " ");
+  return value;
+}
+
+bool fetchText(const char* url, String& body, String& error) {
+  String target(url);
+
+  if (target.startsWith("https://")) {
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+    if (!http.begin(client, target)) {
+      error = "HTTP begin failed";
+      return false;
+    }
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    int code = http.GET();
+
+    if (code <= 0) {
+      error = HTTPClient::errorToString(code);
+      http.end();
+      return false;
+    }
+
+    body = http.getString();
+    http.end();
+
+    if (code < 200 || code >= 300) {
+      error = "HTTP " + String(code);
+      return false;
+    }
+
+    return true;
+  }
+
+  WiFiClient client;
+  HTTPClient http;
+  if (!http.begin(client, target)) {
+    error = "HTTP begin failed";
+    return false;
+  }
+
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  int code = http.GET();
+
+  if (code <= 0) {
+    error = HTTPClient::errorToString(code);
+    http.end();
+    return false;
+  }
+
+  body = http.getString();
+  http.end();
+
+  if (code < 200 || code >= 300) {
+    error = "HTTP " + String(code);
+    return false;
+  }
+
+  return true;
+}
+
+void parseNextDive(const String& icsText, DiveInfo& info) {
+  String summary;
+  long eventDay = -1;
+  long bestDay = LONG_MAX;
+  String bestSummary;
+  bool inEvent = false;
+  int pos = 0;
+  long today = todayDays();
+
+  while (pos < (int)icsText.length()) {
+    String line = nextUnfoldedIcsLine(icsText, pos);
+    if (line.length() == 0) continue;
+
+    if (line == "BEGIN:VEVENT") {
+      inEvent = true;
+      summary = "";
+      eventDay = -1;
+      continue;
+    }
+
+    if (line == "END:VEVENT") {
+      if (inEvent && eventDay >= today && eventDay < bestDay) {
+        bestDay = eventDay;
+        bestSummary = summary.length() ? summary : "Upcoming dive";
+      }
+      inEvent = false;
+      continue;
+    }
+
+    if (!inEvent) continue;
+
+    if (line.startsWith("SUMMARY")) {
+      int colon = line.indexOf(':');
+      if (colon >= 0) summary = cleanIcsText(line.substring(colon + 1));
+    } else if (line.startsWith("DTSTART")) {
+      int colon = line.indexOf(':');
+      if (colon < 0 || colon + 8 >= (int)line.length()) continue;
+
+      String value = line.substring(colon + 1);
+      int year = value.substring(0, 4).toInt();
+      int month = value.substring(4, 6).toInt();
+      int day = value.substring(6, 8).toInt();
+      if (year > 2000 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        eventDay = daysFromCivil(year, month, day);
+      }
+    }
+  }
+
+  if (bestDay != LONG_MAX) {
+    info.nextDive = bestSummary;
+    info.daysUntil = max(0L, bestDay - today);
+  }
+}
+
+bool fetchSubsurfaceStats(DiveInfo& info) {
+  if (String(SUBSURFACE_USERNAME).length() == 0 || String(SUBSURFACE_PASSWORD).length() == 0) {
+    info.error = "Set Subsurface login";
+    return false;
+  }
+
+  String sessionCookies;
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+
+  String loginPageUrl = String(SUBSURFACE_BASE) + "/login?next=/";
+  if (!http.begin(client, loginPageUrl)) {
+    info.error = "Subsurface begin failed";
+    return false;
+  }
+
+  http.addHeader("Accept", "text/html");
+  http.collectHeaders(SUBSURFACE_HEADER_KEYS, SUBSURFACE_HEADER_COUNT);
+  int code = http.GET();
+  String loginPage = http.getString();
+  updateCookieHeader(sessionCookies, http.header("Set-Cookie"));
+  Serial.println("Login page HTTP " + String(code) + ", cookie bytes " + String(sessionCookies.length()));
+  http.end();
+
+  if (code < 200 || code >= 300) {
+    info.error = "Login page HTTP " + String(code);
+    return false;
+  }
+
+  String csrfToken = findCsrfToken(loginPage);
+  if (csrfToken.length() == 0) {
+    info.error = "No CSRF token";
+    return false;
+  }
+  if (sessionCookies.length() == 0) {
+    info.error = "No login cookie";
+    return false;
+  }
+
+  String loginBody = "username=" + urlEncode(SUBSURFACE_USERNAME) +
+                     "&password=" + urlEncode(SUBSURFACE_PASSWORD) +
+                     "&csrf_token=" + urlEncode(csrfToken);
+
+  WiFiClientSecure loginClient;
+  loginClient.setInsecure();
+  http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+
+  if (!http.begin(loginClient, String(SUBSURFACE_BASE) + "/login")) {
+    info.error = "Login begin failed";
+    return false;
+  }
+
+  http.addHeader("Accept", "text/html,application/json");
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  http.addHeader("Referer", loginPageUrl);
+  addCookieHeader(http, sessionCookies);
+  http.collectHeaders(SUBSURFACE_HEADER_KEYS, SUBSURFACE_HEADER_COUNT);
+  code = http.POST(loginBody);
+  updateCookieHeader(sessionCookies, http.header("Set-Cookie"));
+  Serial.println("Login POST HTTP " + String(code) + ", cookie bytes " + String(sessionCookies.length()));
+  http.end();
+
+  if (code < 200 || code >= 400) {
+    info.error = "Login HTTP " + String(code);
+    return false;
+  }
+  if (sessionCookies.length() == 0) {
+    info.error = "No auth cookie";
+    return false;
+  }
+
+  WiFiClientSecure statsClient;
+  statsClient.setInsecure();
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+  if (!http.begin(statsClient, String(SUBSURFACE_BASE) + "/api/stats")) {
+    info.error = "Stats begin failed";
+    return false;
+  }
+
+  http.addHeader("Accept", "application/json");
+  addCookieHeader(http, sessionCookies);
+  code = http.GET();
+  String statsBody = http.getString();
+  Serial.println("Stats HTTP " + String(code));
+  http.end();
+
+  if (code < 200 || code >= 300) {
+    info.error = "Stats HTTP " + String(code);
+    return false;
+  }
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, statsBody);
+  if (err) {
+    info.error = "Stats JSON failed";
+    return false;
+  }
+
+  const char* status = doc["status"] | "success";
+  if (String(status) != "success") {
+    info.error = "Stats status failed";
+    return false;
+  }
+
+  JsonVariant statistics = doc["statistics"];
+  int totalDives = doc["total_dives"] | 0;
+  int totalMinutes = statistics["total_dive_time_minutes"] | 0;
+  float maxDepthMeters = statistics["max_depth_meters"] | 0.0f;
+
+  info.totalDives = String(totalDives);
+  info.totalMinutesUnderwater = formatMinutes(totalMinutes);
+  info.deepestDive = String(metersToFeet(maxDepthMeters)) + " ft";
+  return true;
+}
+
+bool buildDiveInfo(DiveInfo& info) {
+  if (!fetchSubsurfaceStats(info)) return false;
+
+  String icsText;
+  String calendarError;
+  if (String(CALENDAR_LINK).length() > 0 &&
+      fetchText(CALENDAR_LINK, icsText, calendarError)) {
+    parseNextDive(icsText, info);
+  }
+
+  info.ok = true;
+  return true;
+}
+
+
+
+
+// ================= WIFI =================
+bool connectWiFi() {
+  wifiDebugLineCount = 0;
+
+  WiFi.mode(WIFI_STA);
+  WiFi.persistent(false);
+  WiFi.setSleep(false);
+  WiFi.disconnect(false, true);
+  delay(500);
+  WiFi.mode(WIFI_STA);
+
+  addWiFiDebugLine("Scanning 2.4GHz...");
+  int networks = WiFi.scanNetworks(false, true);
+  addWiFiDebugLine("Found " + String(networks) + " networks");
+  if (networks < 0) {
+    addWiFiDebugLine("Scan error " + String(networks));
+  }
+
+  for (int i = 0; i < WIFI_COUNT; i++) {
+    int bestRssi = -999;
+    for (int n = 0; n < networks; n++) {
+      if (WiFi.SSID(n) == WIFI_NETWORKS[i][0] && WiFi.RSSI(n) > bestRssi) {
+        bestRssi = WiFi.RSSI(n);
+      }
+    }
+
+    if (bestRssi > -999) {
+      addWiFiDebugLine(String(WIFI_NETWORKS[i][0]) + " seen " + String(bestRssi) + "dBm");
+    } else {
+      addWiFiDebugLine(String(WIFI_NETWORKS[i][0]) + " not seen");
+    }
+  }
+
+  WiFi.scanDelete();
+
+  for (int i = 0; i < WIFI_COUNT; i++) {
+    Serial.print("Connecting to ");
+    Serial.println(WIFI_NETWORKS[i][0]);
+
+    WiFi.disconnect(false, false);
+    delay(250);
+    WiFi.begin(WIFI_NETWORKS[i][0], WIFI_NETWORKS[i][1]);
+
+    int tries = 0;
+    while (WiFi.status() != WL_CONNECTED && tries < 40) {
+      delay(500);
+      tries++;
+    }
+
+    wl_status_t status = WiFi.status();
+    addWiFiDebugLine(String(WIFI_NETWORKS[i][0]) + " -> " + wifiStatusText(status));
+    Serial.print("WiFi status: ");
+    Serial.println(wifiStatusText(status));
+
+    if (status == WL_CONNECTED) return true;
+  }
+
+  return false;
+}
+
+// ================= SLEEP =================
+void enterDeepSleep() {
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+  VextOFF();
+
+  if (USE_REED_SWITCH) {
+    setupWakePinRTC((gpio_num_t)WAKE_PIN);
+    esp_sleep_enable_ext1_wakeup(1ULL << WAKE_PIN, ESP_EXT1_WAKEUP_ANY_LOW);
+  }
+
+  esp_sleep_enable_timer_wakeup(24ULL * 60ULL * 60ULL * 1000000ULL);
+
+  Serial.print("Going to sleep. Reed=");
+  Serial.print(USE_REED_SWITCH ? "on" : "off");
+  if (USE_REED_SWITCH) {
+    Serial.print(" WAKE_PIN=");
+    Serial.print(WAKE_PIN);
+    Serial.print(" state=");
+    Serial.print(digitalRead(WAKE_PIN));
+  }
+  Serial.println();
+
+  Serial.flush();
+  delay(50);
+  esp_deep_sleep_start();
+}
+
+// ================= SETUP =================
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  if (USE_REED_SWITCH) {
+    releaseWakePinRTC((gpio_num_t)WAKE_PIN);
+    pinMode(WAKE_PIN, INPUT_PULLUP);
+  }
+
+  VextON();
+  delay(50);
+
+  display.init();
+  display.screenRotate(ANGLE_0_DEGREE);
+  initBatteryMonitor();
+
+  savedRotation = normalizeRotation(SCREEN_ROTATION);
+  if (USE_AUTO_ROTATION) {
+    Wire.begin(SDA_PIN, SCL_PIN);
+    delay(20);
+
+    if (sox.begin_I2C()) {
+      savedRotation = detectOrientation();
+    } else {
+      Serial.println("IMU not found; using fixed orientation.");
+    }
+  }
+  applyRotation(savedRotation);
+
+  float voltage = readBatteryVoltage();
+  int batteryPercent = estimateBatteryPercent(voltage);
+  if (batteryPercent <= LOW_BATTERY_PERCENT) {
+    Serial.println("Battery low -> charge now screen");
+    showChargeNowScreen();
+    delay(2000);
+    enterDeepSleep();
+  }
+
+  esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+  Serial.print("Wake cause: ");
+  Serial.println((int)cause);
+
+  if (USE_REED_SWITCH && digitalRead(WAKE_PIN) == LOW && confirmedLow()) {
+    Serial.println("Reed LOW -> waiting for release");
+    Serial.println("Waiting for reed release...");
+    while (digitalRead(WAKE_PIN) == LOW) delay(10);
+    delay(80); // debounce settle
+  }
+
+  if (!connectWiFi()) {
+    showWiFiFailureScreen();
+  } else {
+    DiveInfo info;
+    if (!syncClock()) {
+      showUpdateError("Time sync failed");
+    } else if (!buildDiveInfo(info)) {
+      showUpdateError(info.error);
+    } else if (isHorizontalRotation()) {
+      showStats(
+        info.totalDives,
+        info.totalMinutesUnderwater,
+        info.deepestDive,
+        info.daysUntil,
+        info.nextDive
+      );
+    } else {
+      showStatsVertical(
+        info.totalDives,
+        info.totalMinutesUnderwater,
+        info.deepestDive,
+        info.daysUntil,
+        info.nextDive
+      );
+    }
+  }
+
+  delay(2000);
+  enterDeepSleep();
+}
+
+void loop() {}

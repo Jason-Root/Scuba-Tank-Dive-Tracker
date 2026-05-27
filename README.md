@@ -1,124 +1,61 @@
-# Scuba Tank Dive Tracker (Vision Master E290)
+# Scuba Tank Dive Tracker
 
-This project runs on a Heltec Vision Master E290 and displays dive stats on e-paper.
+Firmware for a Heltec Vision Master E290 / ESP32-S3 e-paper dive display.
 
-It supports:
-- Normal low-power operation with deep sleep
-- Orientation-based display layout
-- Magnet/reed-switch wake
-- OTA firmware updates
-- Optional internet auto-update from GitHub release binaries
-- Daily data refresh from a JSON endpoint
-- Auto firmware version from Git (`git describe --tags --always --dirty`)
+The sketch is self-contained: it connects to WiFi, logs in to Subsurface Cloud,
+fetches `/api/stats`, optionally reads a public calendar `.ics` feed for the
+next dive, updates the e-paper display, then sleeps until the next daily update
+or optional reed-switch wake.
 
-## What It Displays
+## Configure
 
-The firmware fetches JSON from `JSON_URL` defined in `src/secrets.h`.
+Edit the `EDIT THESE SETTINGS` section near the top of `DiveInfoV1_3.ino`.
+Most users should only need this block:
 
-Expected fields:
-- `totalDives`
-- `totalMinutesUnderwater`
-- `deepestDive`
-- `daysUntil`
-- `nextDive`
+```cpp
+const char* WIFI_NAME = "YOUR_2G_WIFI_NAME";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 
-## Wake + Sleep Behavior
+const char* SUBSURFACE_USERNAME = "";
+const char* SUBSURFACE_PASSWORD = "";
 
-- Device wakes from:
-  - Reed switch (`WAKE_PIN` LOW)
-  - 24-hour timer wake
-- After handling wake logic, it returns to deep sleep.
+const char* CALENDAR_LINK = "";
 
-## Data Refresh Behavior
+const bool USE_REED_SWITCH = true;
+const bool USE_AUTO_ROTATION = true;
+const int SCREEN_ROTATION = 0;
 
-- Forced refresh (`?refresh=1`) happens only when:
-  - The 24-hour timer wake fires
-  - OTA mode is entered
-- Other wake events show cached values from RTC memory.
-
-## Magnet / Orientation Behavior
-
-- Reed switch LOW opens a short orientation check window.
-- OTA mode is entered when the device is held upside down during the reed-switch window.
-- Orientation is sampled a few times before deciding, which makes sideways rotation snappier and OTA entry more deliberate.
-- Side orientations are rendered at 90-degree display orientation to avoid showing a 270-degree-rendered screen.
-
-Relevant constants in `src/DiveInfo.ino`:
-- `OTA_TRIGGER_ROTATION`
-- `OTA_TRIGGER_WINDOW_MS`
-- `OTA_WINDOW_MS`
-- `WAKE_PIN`
-
-## OTA Behavior
-
-- OTA mode screen shows:
-  - Logo + battery
-  - Current device IP
-- OTA listens for `OTA_WINDOW_MS` (currently 60s).
-- If no OTA upload occurs, firmware reboots.
-
-## Internet OTA (Optional)
-
-- If `INTERNET_OTA_MANIFEST_URL` is set in `src/secrets.h`, firmware checks for updates:
-  - During daily timer wake (`INTERNET_OTA_CHECK_ON_TIMER_WAKE = 1`)
-  - When OTA mode is entered with the magnet
-- If manifest `version` differs from current firmware version, the device downloads and applies `bin_url`.
-- Updates are skipped when battery percent is below `INTERNET_OTA_MIN_BATTERY_PERCENT`.
-
-Manifest JSON example:
-
-```json
-{
-  "version": "v1.6.0",
-  "bin_url": "https://github.com/<user>/<repo>/releases/download/v1.6.0/firmware.bin"
-}
+const int LOW_BATTERY_PERCENT = 10;
 ```
 
-## Build and Upload (PlatformIO)
+Set `USE_REED_SWITCH` to `false` for builds without the magnetic reed switch.
+Set `USE_AUTO_ROTATION` to `false` for builds without the IMU/9DOF board,
+then choose `SCREEN_ROTATION` as `0`, `90`, `180`, or `270`.
 
-`platformio.ini` is configured with:
-- `vision_master_e290` (default): OTA upload (`espota`)
-- `vision_master_e290_usb`: emergency USB upload (`esptool`, `COM9`)
+The ESP32-S3 only supports 2.4 GHz WiFi.
 
-Commands:
+Do not commit real WiFi passwords or Subsurface credentials to GitHub. Fill
+them in locally before flashing your own device.
+
+## Battery
+
+The Vision Master E290 battery sense path uses:
+
+- GPIO7 for ADC voltage
+- GPIO46 as `INPUT_PULLUP`
+- scale multiplier `4.90`
+
+If the estimated battery is at or below `LOW_BATTERY_PERCENT`, the daily update
+shows only a battery symbol and `charge now` instead of dive stats.
+
+## Build
 
 ```powershell
-# Default (OTA)
-platformio run -e vision_master_e290 -t upload
-
-# Emergency USB
-platformio run -e vision_master_e290_usb -t upload
+pio run -e vision_master_e290
 ```
 
-## First-Time Configuration Checklist
+Upload:
 
-Firmware secrets/config:
-- Copy `src/secrets.example.h` to `src/secrets.h`
-- Set your own:
-  - `wifiList`
-  - `JSON_URL`
-  - `OTA_HOSTNAME`
-  - `OTA_PASSWORD` (set non-empty for protection)
-  - `INTERNET_OTA_MANIFEST_URL` (optional)
-  - `INTERNET_OTA_MIN_BATTERY_PERCENT` (optional)
-  - `INTERNET_OTA_CHECK_ON_TIMER_WAKE` (optional)
-
-Runtime settings in code (`src/DiveInfo.ino`):
-- `OTA_ROTATION` if you want a different trigger orientation
-
-Edit `platformio.ini`:
-- `upload_port` under `env:vision_master_e290` to current OTA IP shown on the device
-- `upload_port` under `env:vision_master_e290_usb` if COM port changes
-
-Worker secrets/config (`src/worker.js`):
-- Set Cloudflare Worker env vars:
-  - `ICS_URL`
-  - `DIVEL0GS_USER`
-  - `DIVEL0GS_PASS`
-
-## Notes
-
-- `src/worker.js` is included in this repo as a Cloudflare Worker source for generating the JSON payload.
-- OTA upload requires the board to be on the OTA screen and reachable on the same network.
-- `src/secrets.h` is intentionally ignored by Git so personal Wi-Fi and endpoint values are not committed.
-- Firmware version shown on screen is injected at build time from Git via `scripts/git_version.py`.
+```powershell
+pio run -e vision_master_e290 -t upload
+```
