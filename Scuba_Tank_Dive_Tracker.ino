@@ -7,9 +7,13 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <Preferences.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
 #include "HT_DEPG0290BxS800FxX_BW.h"
+#include "qrcodegen.h"
 #include <Adafruit_LSM6DSOX.h>
 #include <driver/rtc_io.h>
 #include <ctype.h>
@@ -43,6 +47,10 @@ const char* FIRMWARE_BUILD = __DATE__ " " __TIME__;
 const char* SUBSURFACE_BASE = "https://cloud.subsurface-divelog.org";
 const char* LOCAL_TIMEZONE = "EST5EDT,M3.2.0/2,M11.1.0/2";
 const char* NTP_SERVER = "pool.ntp.org";
+const char* SETUP_AP_NAME = "ScubaTracker-Setup";
+const char* SETUP_PORTAL_URL = "http://192.168.4.1/";
+const uint8_t MAX_SAVED_WIFI = 3;
+const byte DNS_PORT = 53;
 
 const char* WIFI_NETWORKS[][2] = {
   {WIFI_NAME, WIFI_PASSWORD}
@@ -78,6 +86,9 @@ DEPG0290BxS800FxX_BW display(
   DISPLAY_POWER_PIN,
   DISPLAY_SPI_FREQUENCY
 );
+
+DNSServer dnsServer;
+WebServer setupServer(80);
 
 // ================= ORIENTATION =================
 Adafruit_LSM6DSOX sox;
@@ -391,18 +402,257 @@ String wifiStatusText(wl_status_t status) {
   }
 }
 
-void showWiFiFailureScreen() {
-  display.clear();
-  display.setTextAlignment(TEXT_ALIGN_LEFT);
-  display.setFont(ArialMT_Plain_10);
-  display.drawString(0, 0, "WiFi failed - 2.4GHz only");
-  display.drawString(0, 12, String("Build ") + FIRMWARE_BUILD);
+struct WiFiCredential {
+  String ssid;
+  String password;
+};
 
-  for (uint8_t i = 0; i < wifiDebugLineCount; i++) {
-    display.drawString(0, 25 + i * 10, wifiDebugLines[i]);
+bool isUsableWiFiCredential(const String& ssid) {
+  return ssid.length() > 0 && ssid != "YOUR_2G_WIFI_NAME";
+}
+
+String htmlEscape(String value) {
+  value.replace("&", "&amp;");
+  value.replace("<", "&lt;");
+  value.replace(">", "&gt;");
+  value.replace("\"", "&quot;");
+  value.replace("'", "&#39;");
+  return value;
+}
+
+uint8_t loadSavedWiFiCredentials(WiFiCredential saved[]) {
+  Preferences preferences;
+  uint8_t count = 0;
+
+  if (!preferences.begin("wifi-list", true)) return 0;
+
+  for (uint8_t i = 0; i < MAX_SAVED_WIFI; i++) {
+    String ssidKey = "ssid" + String(i);
+    String passKey = "pass" + String(i);
+    String ssid = preferences.getString(ssidKey.c_str(), "");
+    if (isUsableWiFiCredential(ssid)) {
+      saved[count].ssid = ssid;
+      saved[count].password = preferences.getString(passKey.c_str(), "");
+      count++;
+    }
+  }
+
+  preferences.end();
+  return count;
+}
+
+void saveWiFiCredential(const String& ssid, const String& password) {
+  WiFiCredential saved[MAX_SAVED_WIFI];
+  uint8_t existingCount = loadSavedWiFiCredentials(saved);
+
+  Preferences preferences;
+  if (!preferences.begin("wifi-list", false)) return;
+
+  preferences.putString("ssid0", ssid);
+  preferences.putString("pass0", password);
+
+  uint8_t writeIndex = 1;
+  for (uint8_t i = 0; i < existingCount && writeIndex < MAX_SAVED_WIFI; i++) {
+    if (saved[i].ssid == ssid) continue;
+    String ssidKey = "ssid" + String(writeIndex);
+    String passKey = "pass" + String(writeIndex);
+    preferences.putString(ssidKey.c_str(), saved[i].ssid);
+    preferences.putString(passKey.c_str(), saved[i].password);
+    writeIndex++;
+  }
+
+  for (uint8_t i = writeIndex; i < MAX_SAVED_WIFI; i++) {
+    String ssidKey = "ssid" + String(i);
+    String passKey = "pass" + String(i);
+    preferences.remove(ssidKey.c_str());
+    preferences.remove(passKey.c_str());
+  }
+
+  preferences.end();
+}
+
+void drawQRCode(const String& payload, int x, int y, int maxPixels) {
+  uint8_t qrcode[qrcodegen_BUFFER_LEN_FOR_VERSION(6)];
+  uint8_t temp[qrcodegen_BUFFER_LEN_FOR_VERSION(6)];
+
+  bool ok = qrcodegen_encodeText(payload.c_str(),
+                                 temp,
+                                 qrcode,
+                                 qrcodegen_Ecc_LOW,
+                                 qrcodegen_VERSION_MIN,
+                                 6,
+                                 qrcodegen_Mask_AUTO,
+                                 true);
+  if (!ok) return;
+
+  int size = qrcodegen_getSize(qrcode);
+  int scale = max(1, maxPixels / (size + 8));
+  int quiet = 4 * scale;
+  int qrPixels = size * scale;
+
+  display.drawRect(x, y, qrPixels + quiet * 2, qrPixels + quiet * 2);
+
+  for (int row = 0; row < size; row++) {
+    for (int col = 0; col < size; col++) {
+      if (qrcodegen_getModule(qrcode, col, row)) {
+        display.fillRect(x + quiet + col * scale,
+                         y + quiet + row * scale,
+                         scale,
+                         scale);
+      }
+    }
+  }
+}
+
+void showWiFiSetupScreen(IPAddress apIP) {
+  display.clear();
+  String qrPayload = "WIFI:T:nopass;S:" + String(SETUP_AP_NAME) + ";;";
+
+  if (isHorizontalRotation()) {
+    drawQRCode(qrPayload, 8, 8, 112);
+
+    display.setTextAlignment(TEXT_ALIGN_LEFT);
+    display.setFont(ArialMT_Plain_16);
+    drawStringBold(132, 10, "WiFi setup");
+
+    display.setFont(ArialMT_Plain_10);
+    display.drawString(132, 38, "Scan QR to join:");
+    display.drawString(132, 52, SETUP_AP_NAME);
+    display.drawString(132, 74, "Then open:");
+    display.drawString(132, 88, String("http://") + apIP.toString());
+  } else {
+    drawQRCode(qrPayload, 14, 8, 100);
+
+    display.setTextAlignment(TEXT_ALIGN_CENTER);
+    display.setFont(ArialMT_Plain_16);
+    drawStringBold(64, 126, "WiFi setup");
+
+    display.setFont(ArialMT_Plain_10);
+    display.drawString(64, 152, "Scan QR to join");
+    display.drawString(64, 168, SETUP_AP_NAME);
+    display.drawString(64, 194, String("Open ") + apIP.toString());
   }
 
   display.display();
+}
+
+String buildWiFiSetupPage(const String& message = "") {
+  int networks = WiFi.scanNetworks(false, true);
+
+  String html = "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>";
+  html += "<title>Scuba Tracker WiFi</title><style>";
+  html += "body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0;background:#f6f7f9;color:#111}";
+  html += "main{max-width:520px;margin:0 auto;padding:24px}h1{font-size:24px;margin:0 0 8px}";
+  html += "p{line-height:1.4}label{display:block;font-weight:650;margin:18px 0 8px}";
+  html += "select,input,button{box-sizing:border-box;width:100%;font:inherit;padding:12px;border-radius:8px;border:1px solid #bbb;background:white}";
+  html += "button{margin-top:22px;background:#111;color:white;border:0;font-weight:700}";
+  html += ".msg{padding:12px;border-radius:8px;background:#e6f4ea;margin:16px 0}.hint{color:#555;font-size:14px}";
+  html += "</style></head><body><main><h1>Scuba Tracker WiFi</h1>";
+  html += "<p>Select a 2.4 GHz WiFi network and save it. The tracker will restart and use it for future updates.</p>";
+
+  if (message.length() > 0) {
+    html += "<div class='msg'>" + htmlEscape(message) + "</div>";
+  }
+
+  html += "<form method='post' action='/save'>";
+  html += "<label for='ssid'>WiFi network</label><select id='ssid' name='ssid'>";
+
+  if (networks <= 0) {
+    html += "<option value=''>No networks found</option>";
+  } else {
+    for (int i = 0; i < networks; i++) {
+      String ssid = WiFi.SSID(i);
+      if (ssid.length() == 0) continue;
+      html += "<option value='" + htmlEscape(ssid) + "'>";
+      html += htmlEscape(ssid) + " (" + String(WiFi.RSSI(i)) + " dBm";
+      if (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) html += ", open";
+      html += ")</option>";
+    }
+  }
+
+  html += "<option value='__manual__'>Type network name manually</option>";
+  html += "</select>";
+  html += "<label for='manual_ssid'>Manual network name</label>";
+  html += "<input id='manual_ssid' name='manual_ssid' placeholder='Only needed if hidden'>";
+  html += "<label for='password'>WiFi password</label>";
+  html += "<input id='password' name='password' type='password' autocomplete='current-password'>";
+  html += "<button type='submit'>Save WiFi</button></form>";
+  html += "<p class='hint'><a href='/'>Scan again</a></p>";
+  html += "</main></body></html>";
+
+  WiFi.scanDelete();
+  return html;
+}
+
+void handleSetupRoot() {
+  setupServer.send(200, "text/html", buildWiFiSetupPage());
+}
+
+void handleSetupSave() {
+  String ssid = setupServer.arg("ssid");
+  String password = setupServer.arg("password");
+
+  if (ssid == "__manual__") ssid = setupServer.arg("manual_ssid");
+  ssid.trim();
+
+  if (!isUsableWiFiCredential(ssid)) {
+    setupServer.send(200, "text/html", buildWiFiSetupPage("Enter a WiFi network name first."));
+    return;
+  }
+
+  saveWiFiCredential(ssid, password);
+  setupServer.send(200, "text/html",
+                   "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                   "<title>Saved</title></head><body style='font-family:system-ui;padding:24px'>"
+                   "<h1>WiFi saved</h1><p>The tracker is restarting now.</p></body></html>");
+
+  display.clear();
+  display.setTextAlignment(TEXT_ALIGN_CENTER);
+  display.setFont(ArialMT_Plain_24);
+  drawStringBold(isHorizontalRotation() ? 148 : 64,
+                 isHorizontalRotation() ? 44 : 118,
+                 "WiFi saved");
+  display.setFont(ArialMT_Plain_10);
+  display.drawString(isHorizontalRotation() ? 148 : 64,
+                     isHorizontalRotation() ? 82 : 154,
+                     "Restarting...");
+  display.display();
+
+  delay(1500);
+  ESP.restart();
+}
+
+void handleSetupNotFound() {
+  setupServer.sendHeader("Location", SETUP_PORTAL_URL, true);
+  setupServer.send(302, "text/plain", "");
+}
+
+void startWiFiSetupPortal() {
+  Serial.println("Starting WiFi setup portal");
+  WiFi.disconnect(false, true);
+  delay(250);
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.setSleep(false);
+  WiFi.softAP(SETUP_AP_NAME);
+
+  IPAddress apIP = WiFi.softAPIP();
+  dnsServer.start(DNS_PORT, "*", apIP);
+
+  setupServer.on("/", HTTP_GET, handleSetupRoot);
+  setupServer.on("/save", HTTP_POST, handleSetupSave);
+  setupServer.on("/generate_204", HTTP_GET, handleSetupRoot);
+  setupServer.on("/hotspot-detect.html", HTTP_GET, handleSetupRoot);
+  setupServer.on("/fwlink", HTTP_GET, handleSetupRoot);
+  setupServer.onNotFound(handleSetupNotFound);
+  setupServer.begin();
+
+  showWiFiSetupScreen(apIP);
+
+  while (true) {
+    dnsServer.processNextRequest();
+    setupServer.handleClient();
+    delay(2);
+  }
 }
 
 // ================= DIVE DATA =================
@@ -847,6 +1097,47 @@ bool buildDiveInfo(DiveInfo& info) {
 
 
 // ================= WIFI =================
+bool tryConnectToWiFi(const String& ssid, const String& password) {
+  if (!isUsableWiFiCredential(ssid)) return false;
+
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  WiFi.disconnect(false, false);
+  delay(250);
+  WiFi.begin(ssid.c_str(), password.c_str());
+
+  int tries = 0;
+  while (WiFi.status() != WL_CONNECTED && tries < 40) {
+    delay(500);
+    tries++;
+  }
+
+  wl_status_t status = WiFi.status();
+  addWiFiDebugLine(ssid + " -> " + wifiStatusText(status));
+  Serial.print("WiFi status: ");
+  Serial.println(wifiStatusText(status));
+
+  return status == WL_CONNECTED;
+}
+
+void addNetworkScanDebugLine(const String& ssid, int networks) {
+  if (!isUsableWiFiCredential(ssid)) return;
+
+  int bestRssi = -999;
+  for (int n = 0; n < networks; n++) {
+    if (WiFi.SSID(n) == ssid && WiFi.RSSI(n) > bestRssi) {
+      bestRssi = WiFi.RSSI(n);
+    }
+  }
+
+  if (bestRssi > -999) {
+    addWiFiDebugLine(ssid + " seen " + String(bestRssi) + "dBm");
+  } else {
+    addWiFiDebugLine(ssid + " not seen");
+  }
+}
+
 bool connectWiFi() {
   wifiDebugLineCount = 0;
 
@@ -864,43 +1155,25 @@ bool connectWiFi() {
     addWiFiDebugLine("Scan error " + String(networks));
   }
 
-  for (int i = 0; i < WIFI_COUNT; i++) {
-    int bestRssi = -999;
-    for (int n = 0; n < networks; n++) {
-      if (WiFi.SSID(n) == WIFI_NETWORKS[i][0] && WiFi.RSSI(n) > bestRssi) {
-        bestRssi = WiFi.RSSI(n);
-      }
-    }
+  WiFiCredential saved[MAX_SAVED_WIFI];
+  uint8_t savedCount = loadSavedWiFiCredentials(saved);
 
-    if (bestRssi > -999) {
-      addWiFiDebugLine(String(WIFI_NETWORKS[i][0]) + " seen " + String(bestRssi) + "dBm");
-    } else {
-      addWiFiDebugLine(String(WIFI_NETWORKS[i][0]) + " not seen");
-    }
+  for (uint8_t i = 0; i < savedCount; i++) {
+    addNetworkScanDebugLine(saved[i].ssid, networks);
+  }
+
+  for (int i = 0; i < WIFI_COUNT; i++) {
+    addNetworkScanDebugLine(WIFI_NETWORKS[i][0], networks);
   }
 
   WiFi.scanDelete();
 
+  for (uint8_t i = 0; i < savedCount; i++) {
+    if (tryConnectToWiFi(saved[i].ssid, saved[i].password)) return true;
+  }
+
   for (int i = 0; i < WIFI_COUNT; i++) {
-    Serial.print("Connecting to ");
-    Serial.println(WIFI_NETWORKS[i][0]);
-
-    WiFi.disconnect(false, false);
-    delay(250);
-    WiFi.begin(WIFI_NETWORKS[i][0], WIFI_NETWORKS[i][1]);
-
-    int tries = 0;
-    while (WiFi.status() != WL_CONNECTED && tries < 40) {
-      delay(500);
-      tries++;
-    }
-
-    wl_status_t status = WiFi.status();
-    addWiFiDebugLine(String(WIFI_NETWORKS[i][0]) + " -> " + wifiStatusText(status));
-    Serial.print("WiFi status: ");
-    Serial.println(wifiStatusText(status));
-
-    if (status == WL_CONNECTED) return true;
+    if (tryConnectToWiFi(WIFI_NETWORKS[i][0], WIFI_NETWORKS[i][1])) return true;
   }
 
   return false;
@@ -984,7 +1257,7 @@ void setup() {
   }
 
   if (!connectWiFi()) {
-    showWiFiFailureScreen();
+    startWiFiSetupPortal();
   } else {
     DiveInfo info;
     if (!syncClock()) {

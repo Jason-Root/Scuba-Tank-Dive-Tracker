@@ -34,6 +34,12 @@ then choose `SCREEN_ROTATION` as `0`, `90`, `180`, or `270`.
 
 The ESP32-S3 only supports 2.4 GHz WiFi.
 
+If the tracker cannot connect to WiFi, it starts a setup network named
+`ScubaTracker-Setup` and shows a QR code on the e-paper display. Scan the QR
+code, join that network, then open `http://192.168.4.1/`. Choose a 2.4 GHz WiFi
+network, enter the password, and save. The tracker stores up to three saved WiFi
+networks and tries them before the WiFi name in the sketch.
+
 ## Battery
 
 The Vision Master E290 battery sense path uses:
